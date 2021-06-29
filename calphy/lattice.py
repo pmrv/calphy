@@ -1,7 +1,8 @@
 
 from mendeleev import element
 import os
-from pylammpsmpi import LammpsLibrary
+#from pylammpsmpi import LammpsLibrary
+from lammps import PyLammps
 import numpy as np
 import pyscal.core as pc
 from calphy.helpers import create_object

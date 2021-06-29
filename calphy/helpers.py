@@ -2,7 +2,9 @@
 Helper methods for pytint
 """
 import os
-from pylammpsmpi import LammpsLibrary
+#from pylammpsmpi import LammpsLibrary
+#from mpi4py import MPI
+from lammps import PyLammps
 import logging
 import numpy as np
 from lammps import lammps
@@ -16,8 +18,9 @@ LAMMPS helper routines
 def create_object(cores, directory, timestep):
     """
     """
-    lmp = LammpsLibrary(mode="local", cores=cores, 
-        working_directory=directory)
+    #lmp = LammpsLibrary(mode="local", cores=cores, 
+    #    working_directory=directory)
+    lmp = PyLammps()
     
     lmp.units("metal")
     lmp.boundary("p p p")
