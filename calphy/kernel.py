@@ -63,11 +63,13 @@ def run_jobs(inputfile):
             raise ValueError("Unknown scheduler")
 
         #for lattice just provide the number of position
-        scheduler.maincommand = "calphy_kernel -i %s -k %d"%(inputfile, 
+        executable = os.path.join(os.path.dirname(os.path.abspath(__file__)), "queuekernel.py")
+        scheduler.maincommand = "mpirun -np %d python %s -i %s -k %d"%(options["queue"]["cores"],
+            executable,
+            inputfile, 
             count)
         scheduler.write_script(scriptpath)
         _ = scheduler.submit()
-
 
 
 def main():

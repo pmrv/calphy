@@ -125,7 +125,7 @@ class Solid:
     def check_mpi(self):       
         retval = False
         
-        if self.cores > 1:
+        if self.options["queue"]["cores"] > 1:
             if MPI.COMM_WORLD.rank == 0:
                 retval = True
         else:

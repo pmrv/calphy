@@ -112,3 +112,6 @@ def main():
         routine_alchemy(job)
     else:
         raise ValueError("Mode should be either fe/ts/mts/alchemy")
+
+if __name__=="__main__":
+    main()
