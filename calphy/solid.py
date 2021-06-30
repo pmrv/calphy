@@ -6,7 +6,7 @@ reversible scaling.
 
 import numpy as np
 import yaml
-
+from mpi4py import MPI
 from calphy.integrators import *
 import pyscal.traj_process as ptp
 import calphy.lattice as pl
@@ -121,13 +121,26 @@ class Solid:
         self.options["md"]["pair_style"] = self.options["md"]["pair_style"][0]
         self.options["md"]["pair_coeff"] = self.options["md"]["pair_coeff"][0]
 
+    @property
+    def check_mpi(self):       
+        retval = False
+        
+        if self.cores > 1:
+            if MPI.COMM_WORLD.rank == 0:
+                retval = True
+        else:
+            retval = True
+
+        return retval
+
     def prepare_lattice(self):
         #process lattice
-        l, alat, apc, conc = pl.prepare_lattice(self.calc)
-        self.l = l
-        self.alat = alat
-        self.apc = apc
-        self.concentration = conc
+        if self.check_mpi:
+            l, alat, apc, conc = pl.prepare_lattice(self.calc)
+            self.l = l
+            self.alat = alat
+            self.apc = apc
+            self.concentration = conc
 
     def run_averaging(self):
         """
@@ -197,32 +210,33 @@ class Solid:
             laststd = 0.00
             for i in range(int(self.options["md"]["ncycles"])):
                 lmp.command("run              %d"%int(self.options["md"]["nsmall"]))
-                ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
-                #now we can check if it converted
-                file = os.path.join(self.simfolder, "avg.dat")
-                lx, ly, lz, ipress = np.loadtxt(file, usecols=(1, 2, 3, 4), unpack=True)
+                if self.check_mpi:
+                    ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
+                    #now we can check if it converted
+                    file = os.path.join(self.simfolder, "avg.dat")
+                    lx, ly, lz, ipress = np.loadtxt(file, usecols=(1, 2, 3, 4), unpack=True)
                 
-                #lxpc = ((lx*ly*lz)/self.ncells)**(1/3)
-                #lxpc = ipress[-ncount+1:]
-                lxpc = ipress
-                mean = np.mean(lxpc)
-                std = np.std(lxpc)
-                volatom = np.mean((lx*ly*lz)/self.natoms)
-                self.logger.info("At count %d mean pressure is %f with %f vol/atom"%(i+1, mean, volatom))
+                    #lxpc = ((lx*ly*lz)/self.ncells)**(1/3)
+                    #lxpc = ipress[-ncount+1:]
+                    lxpc = ipress
+                    mean = np.mean(lxpc)
+                    std = np.std(lxpc)
+                    volatom = np.mean((lx*ly*lz)/self.natoms)
+                    self.logger.info("At count %d mean pressure is %f with %f vol/atom"%(i+1, mean, volatom))
                 
-                #if (np.abs(laststd - std) < self.options["conv"]["alat_tol"]):
-                if (np.abs(mean - self.p)) < self.options["conv"]["p_tol"]:
+                    #if (np.abs(laststd - std) < self.options["conv"]["alat_tol"]):
+                    if (np.abs(mean - self.p)) < self.options["conv"]["p_tol"]:
 
-                    #process other means
-                    self.lx = np.round(np.mean(lx[-ncount+1:]), decimals=3)
-                    self.ly = np.round(np.mean(ly[-ncount+1:]), decimals=3)
-                    self.lz = np.round(np.mean(lz[-ncount+1:]), decimals=3)
-                    self.volatom = volatom
-                    self.vol = self.lx*self.ly*self.lz
-                    self.logger.info("finalized vol/atom %f at pressure %f"%(self.volatom, mean))
-                    self.logger.info("Avg box dimensions x: %f, y: %f, z:%f"%(self.lx, self.ly, self.lz))
-                    break
-                laststd = std
+                        #process other means
+                        self.lx = np.round(np.mean(lx[-ncount+1:]), decimals=3)
+                        self.ly = np.round(np.mean(ly[-ncount+1:]), decimals=3)
+                        self.lz = np.round(np.mean(lz[-ncount+1:]), decimals=3)
+                        self.volatom = volatom
+                        self.vol = self.lx*self.ly*self.lz
+                        self.logger.info("finalized vol/atom %f at pressure %f"%(self.volatom, mean))
+                        self.logger.info("Avg box dimensions x: %f, y: %f, z:%f"%(self.lx, self.ly, self.lz))
+                        break
+                    laststd = std
 
             #now run for msd
             lmp.command("unfix            1")
@@ -234,10 +248,11 @@ class Solid:
             lmp.command("run               0")
             lmp.command("undump            2")
             
-            solids = ph.find_solid_fraction("traj.dat")
-            if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
-                lmp.close()
-                raise RuntimeError("System melted, increase size or reduce temp!\n Solid detection algorithm only works with BCC/FCC/HCP/SC/DIA. Detection algorithm can be turned off by setting conv:\n solid_frac: 0")
+            if self.check_mpi:
+                solids = ph.find_solid_fraction("traj.dat")
+                if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
+                    lmp.close()
+                    raise RuntimeError("System melted, increase size or reduce temp!\n Solid detection algorithm only works with BCC/FCC/HCP/SC/DIA. Detection algorithm can be turned off by setting conv:\n solid_frac: 0")
         else:
             #routine in which lattice constant will not varied, but is set to a given fixed value
             lmp.command("fix              1 all nvt temp %f %f %f"%(self.t, self.t, self.options["md"]["tdamp"]))
@@ -251,34 +266,34 @@ class Solid:
             lastmean = 100000000
             for i in range(int(self.options["md"]["ncycles"])):
                 lmp.command("run              %d"%int(self.options["md"]["nsmall"]))
-                ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
-                #now we can check if it converted
-                file = os.path.join(self.simfolder, "avg.dat")
-                lx, ly, lz, ipress = np.loadtxt(file, usecols=(1, 2, 3, 4), unpack=True)
+                if self.check_mpi:
+                    ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
+                    #now we can check if it converted
+                    file = os.path.join(self.simfolder, "avg.dat")
+                    lx, ly, lz, ipress = np.loadtxt(file, usecols=(1, 2, 3, 4), unpack=True)
                 
-                #lxpc = ((lx*ly*lz)/self.ncells)**(1/3)
-                #lxpc = ipress[-ncount+1:]
-                lxpc = ipress
-                mean = np.mean(lxpc)
-                if (np.abs(mean - lastmean)) < self.options["conv"]["p_tol"]:
-                    #here we actually have to set the pressure
-                    self.p = mean
-                    std = np.std(lxpc)
-                    volatom = np.mean((lx*ly*lz)/self.natoms)
-                    self.logger.info("At count %d mean pressure is %f with %f vol/atom"%(i+1, mean, volatom))
-                    self.lx = np.round(np.mean(lx[-ncount+1:]), decimals=3)
-                    self.ly = np.round(np.mean(ly[-ncount+1:]), decimals=3)
-                    self.lz = np.round(np.mean(lz[-ncount+1:]), decimals=3)
-                    self.volatom = volatom
-                    self.vol = self.lx*self.ly*self.lz
-                    self.logger.info("finalized vol/atom %f at pressure %f"%(self.volatom, mean))
-                    self.logger.info("Avg box dimensions x: %f, y: %f, z:%f"%(self.lx, self.ly, self.lz))
-                    #now run for msd
-                    break
-                lastmean = mean
+                    #lxpc = ((lx*ly*lz)/self.ncells)**(1/3)
+                    #lxpc = ipress[-ncount+1:]
+                    lxpc = ipress
+                    mean = np.mean(lxpc)
+                    if (np.abs(mean - lastmean)) < self.options["conv"]["p_tol"]:
+                        #here we actually have to set the pressure
+                        self.p = mean
+                        std = np.std(lxpc)
+                        volatom = np.mean((lx*ly*lz)/self.natoms)
+                        self.logger.info("At count %d mean pressure is %f with %f vol/atom"%(i+1, mean, volatom))
+                        self.lx = np.round(np.mean(lx[-ncount+1:]), decimals=3)
+                        self.ly = np.round(np.mean(ly[-ncount+1:]), decimals=3)
+                        self.lz = np.round(np.mean(lz[-ncount+1:]), decimals=3)
+                        self.volatom = volatom
+                        self.vol = self.lx*self.ly*self.lz
+                        self.logger.info("finalized vol/atom %f at pressure %f"%(self.volatom, mean))
+                        self.logger.info("Avg box dimensions x: %f, y: %f, z:%f"%(self.lx, self.ly, self.lz))
+                        #now run for msd
+                        break
+                    lastmean = mean
             lmp.command("unfix            1")
             lmp.command("unfix            2")
-
 
 
         lmp.command("fix              3 all nvt temp %f %f %f"%(self.t, self.t, self.options["md"]["tdamp"]))
@@ -288,51 +303,54 @@ class Solid:
         laststd = 0.00
         for i in range(self.options["md"]["ncycles"]):
             lmp.command("run              %d"%int(self.options["md"]["nsmall"]))
-            ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
-            #now we can check if it converted
-            file = os.path.join(self.simfolder, "msd.dat")
-            quant = np.loadtxt(file, usecols=(1,), unpack=True)[-ncount+1:]
-            quant = 3*kb*self.t/quant
-            #self.logger.info(quant)
-            mean = np.mean(quant)
-            std = np.std(quant)
-            self.logger.info("At count %d mean k is %f std is %f"%(i+1, mean, std))
-            if (np.abs(laststd - std) < self.options["conv"]["k_tol"]):
-                #now reevaluate spring constants
-                k = []
-                for i in range(self.options["nelements"]):
-                    quant = np.loadtxt(file, usecols=(i+1, ), unpack=True)[-ncount+1:]
-                    quant = 3*kb*self.t/quant
-                    k.append(np.round(np.mean(quant), decimals=2))
+            if self.check_mpi:
+                ncount = int(self.options["md"]["nsmall"])//int(self.options["md"]["nevery"]*self.options["md"]["nrepeat"])
+                #now we can check if it converted
+                file = os.path.join(self.simfolder, "msd.dat")
+                quant = np.loadtxt(file, usecols=(1,), unpack=True)[-ncount+1:]
+                quant = 3*kb*self.t/quant
+                #self.logger.info(quant)
+                mean = np.mean(quant)
+                std = np.std(quant)
+                self.logger.info("At count %d mean k is %f std is %f"%(i+1, mean, std))
+                if (np.abs(laststd - std) < self.options["conv"]["k_tol"]):
+                    #now reevaluate spring constants
+                    k = []
+                    for i in range(self.options["nelements"]):
+                        quant = np.loadtxt(file, usecols=(i+1, ), unpack=True)[-ncount+1:]
+                        quant = 3*kb*self.t/quant
+                        k.append(np.round(np.mean(quant), decimals=2))
 
-                self.k = k
-                
-                #check if one spring constant is okay
-                args = np.argsort(self.concentration)[::-1]
-                safek = self.k[args[0]]
+                    self.k = k
+                    
+                    #check if one spring constant is okay
+                    args = np.argsort(self.concentration)[::-1]
+                    safek = self.k[args[0]]
 
-                for i in range(self.options["nelements"]):
-                    if self.concentration[i]*self.natoms < 2:
-                        self.logger.info("resetting spring constant of species %d from %f to %f to preserve sanity"%(i, self.k[i], safek))
-                        self.k[i] = safek
-                
-                self.logger.info("finalized sprint constants")
-                self.logger.info(self.k)
-                break
-            laststd = std
+                    for i in range(self.options["nelements"]):
+                        if self.concentration[i]*self.natoms < 2:
+                            self.logger.info("resetting spring constant of species %d from %f to %f to preserve sanity"%(i, self.k[i], safek))
+                            self.k[i] = safek
+                    
+                    self.logger.info("finalized sprint constants")
+                    self.logger.info(self.k)
+                    break
+                laststd = std
 
         #check for melting
         lmp.command("dump              2 all custom 1 traj.dat id type mass x y z vx vy vz")
         lmp.command("run               0")
         lmp.command("undump            2")
         
-        solids = ph.find_solid_fraction("traj.dat")
-        if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
-            lmp.close()
-            raise RuntimeError("System melted, increase size or reduce temp!")
+        if self.check_mpi:
+            solids = ph.find_solid_fraction("traj.dat")
+            if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
+                lmp.close()
+                raise RuntimeError("System melted, increase size or reduce temp!")
 
         lmp.close()
-        self.process_traj()
+        if self.check_mpi:
+            self.process_traj()
 
 
     def process_traj(self):
@@ -349,15 +367,16 @@ class Solid:
         None
         
         """
-        trajfile = os.path.join(self.simfolder, "traj.dat")
-        files = ptp.split_trajectory(trajfile)
-        conf = os.path.join(self.simfolder, "conf.dump")
+        if self.check_mpi:
+            trajfile = os.path.join(self.simfolder, "traj.dat")
+            files = ptp.split_trajectory(trajfile)
+            conf = os.path.join(self.simfolder, "conf.dump")
 
-        ph.reset_timestep(files[-1], conf)
+            ph.reset_timestep(files[-1], conf)
 
-        os.remove(trajfile)
-        for file in files:
-            os.remove(file)
+            os.remove(trajfile)
+            for file in files:
+                os.remove(file)
 
 
     def run_integration(self, iteration=1):
@@ -382,8 +401,8 @@ class Solid:
         #lmp.command("variable          k equal %f"%self.k)
         lmp.command("variable          rand equal %d"%np.random.randint(0, 1000))
 
-
-        conf = os.path.join(self.simfolder, "conf.dump")
+        if self.check_mpi:
+            conf = os.path.join(self.simfolder, "conf.dump")
         lmp = ph.read_dump(lmp, conf, species=self.options["nelements"])
 
         #set up potential
@@ -440,28 +459,30 @@ class Solid:
 
         # Forward. 
         lmp.command("run               ${te_run}")
-        str1 = "fix f4 all print 1 \"${dU1} "
-        str2 = []
-        for i in range(self.options["nelements"]):
-            str2.append("${dU%d}"%(i+2))
-        str2.append("${lambda}\"")
-        str2 = " ".join(str2)
-        str3 = " screen no file forward_%d.dat"%iteration
-        command = str1 + str2 + str3
+        if self.check_mpi:
+            str1 = "fix f4 all print 1 \"${dU1} "
+            str2 = []
+            for i in range(self.options["nelements"]):
+                str2.append("${dU%d}"%(i+2))
+            str2.append("${lambda}\"")
+            str2 = " ".join(str2)
+            str3 = " screen no file forward_%d.dat"%iteration
+            command = str1 + str2 + str3
         lmp.command(command)
         lmp.command("run               ${ts_run}")
         lmp.command("unfix             f4")
 
         # Backward. 
         lmp.command("run               ${te_run}")
-        str1 = "fix f4 all print 1 \"${dU1} "
-        str2 = []
-        for i in range(self.options["nelements"]):
-            str2.append("${dU%d}"%(i+2))
-        str2.append("${lambda}\"")
-        str2 = " ".join(str2)
-        str3 = " screen no file backward_%d.dat"%iteration
-        command = str1 + str2 + str3
+        if self.check_mpi:
+            str1 = "fix f4 all print 1 \"${dU1} "
+            str2 = []
+            for i in range(self.options["nelements"]):
+                str2.append("${dU%d}"%(i+2))
+            str2.append("${lambda}\"")
+            str2 = " ".join(str2)
+            str3 = " screen no file backward_%d.dat"%iteration
+            command = str1 + str2 + str3
         lmp.command(command)
         lmp.command("run               ${ts_run}")
         lmp.command("unfix             f4")
@@ -483,25 +504,26 @@ class Solid:
         -------
         None
         """
-        f1 = get_einstein_crystal_fe(self.t, 
-            self.natoms, self.options["mass"], 
-            self.vol, self.k, self.concentration)
-        w, q, qerr = find_w(self.simfolder, nelements=self.options["nelements"], concentration=self.concentration, nsims=self.nsims, 
-            full=True, solid=True)
-        
-        self.fref = f1
-        self.w = w
-        self.ferr = qerr
+        if self.check_mpi:
+            f1 = get_einstein_crystal_fe(self.t, 
+                self.natoms, self.options["mass"], 
+                self.vol, self.k, self.concentration)
+            w, q, qerr = find_w(self.simfolder, nelements=self.options["nelements"], concentration=self.concentration, nsims=self.nsims, 
+                full=True, solid=True)
+            
+            self.fref = f1
+            self.w = w
+            self.ferr = qerr
 
-        if self.p != 0:
-            #add pressure contribution
-            p = self.p/(10000*160.21766208)
-            v = self.vol/self.natoms
-            self.pv = p*v
-        else:
-            self.pv = 0 
+            if self.p != 0:
+                #add pressure contribution
+                p = self.p/(10000*160.21766208)
+                v = self.vol/self.natoms
+                self.pv = p*v
+            else:
+                self.pv = 0 
 
-        self.fe = self.fref + self.w + self.pv
+            self.fe = self.fref + self.w + self.pv
 
 
     def submit_report(self):
@@ -516,32 +538,33 @@ class Solid:
         -------
         None
         """
-        report = {}
+        if self.check_mpi:
+            report = {}
 
-        #input quantities
-        report["input"] = {}
-        report["input"]["temperature"] = int(self.t)
-        report["input"]["pressure"] = float(self.p)
-        report["input"]["lattice"] = str(self.l)
-        report["input"]["element"] = " ".join(np.array(self.options["element"]).astype(str))
-        report["input"]["concentration"] = " ".join(np.array(self.concentration).astype(str))
+            #input quantities
+            report["input"] = {}
+            report["input"]["temperature"] = int(self.t)
+            report["input"]["pressure"] = float(self.p)
+            report["input"]["lattice"] = str(self.l)
+            report["input"]["element"] = " ".join(np.array(self.options["element"]).astype(str))
+            report["input"]["concentration"] = " ".join(np.array(self.concentration).astype(str))
 
-        #average quantities
-        report["average"] = {}
-        report["average"]["vol/atom"] = float(self.volatom)
-        report["average"]["spring_constant"] = " ".join(np.array(self.k).astype(str))
-        
-        #results
-        report["results"] = {}
-        report["results"]["free_energy"] = float(self.fe)
-        report["results"]["error"] = float(self.ferr)
-        report["results"]["reference_system"] = float(self.fref)
-        report["results"]["work"] = float(self.w)
-        report["results"]["pv"] = float(self.pv)
+            #average quantities
+            report["average"] = {}
+            report["average"]["vol/atom"] = float(self.volatom)
+            report["average"]["spring_constant"] = " ".join(np.array(self.k).astype(str))
+            
+            #results
+            report["results"] = {}
+            report["results"]["free_energy"] = float(self.fe)
+            report["results"]["error"] = float(self.ferr)
+            report["results"]["reference_system"] = float(self.fref)
+            report["results"]["work"] = float(self.w)
+            report["results"]["pv"] = float(self.pv)
 
-        reportfile = os.path.join(self.simfolder, "report.yaml")
-        with open(reportfile, 'w') as f:
-            yaml.dump(report, f)
+            reportfile = os.path.join(self.simfolder, "report.yaml")
+            with open(reportfile, 'w') as f:
+                yaml.dump(report, f)
 
 
     def reversible_scaling(self, iteration=1):
@@ -562,12 +585,13 @@ class Solid:
         # solid cannot go directly to nph/langevin
         # pressure needs to be scaled up from initial structure- then temperature
         
-        t0 = self.t
-        tf = self.tend
-        li = 1
-        lf = t0/tf
-        pi = self.p
-        pf = lf*pi
+        if self.check_mpi:
+            t0 = self.t
+            tf = self.tend
+            li = 1
+            lf = t0/tf
+            pi = self.p
+            pf = lf*pi
 
         #create lammps object
         lmp = ph.create_object(self.cores, self.simfolder, self.options["md"]["timestep"])
@@ -580,7 +604,8 @@ class Solid:
         lmp.command("variable          lf equal %f"%lf)
         lmp.command("variable          rand equal %d"%np.random.randint(0, 1000))
 
-        conf = os.path.join(self.simfolder, "conf.dump")
+        if self.check_mpi:
+            conf = os.path.join(self.simfolder, "conf.dump")
         lmp = ph.read_dump(lmp, conf, species=self.options["nelements"])
 
         #set up potential
@@ -640,10 +665,11 @@ class Solid:
         lmp.command("run               0")
         lmp.command("undump            2")
         
-        solids = ph.find_solid_fraction("traj.dat")
-        if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
-            lmp.close()
-            raise RuntimeError("System melted, increase size or reduce scaling!")
+        if self.check_mpi:
+            solids = ph.find_solid_fraction("traj.dat")
+            if (solids/lmp.natoms < self.options["conv"]["solid_frac"]):
+                lmp.close()
+                raise RuntimeError("System melted, increase size or reduce scaling!")
         
         lmp.command("fix              f1 all nph %s %f %f %f fixedpoint ${xcm} ${ycm} ${zcm}"%( self.iso, pf, 
             pf, self.options["md"]["pdamp"]))
@@ -670,5 +696,6 @@ class Solid:
         """
         Carry out the reversible scaling operation
         """
-        integrate_rs(self.simfolder, self.fe, self.t, self.natoms, p=self.p,
-            nsims=self.nsims, scale_energy=scale_energy, return_values=return_values)
+        if self.check_mpi:
+            integrate_rs(self.simfolder, self.fe, self.t, self.natoms, p=self.p,
+                nsims=self.nsims, scale_energy=scale_energy, return_values=return_values)
