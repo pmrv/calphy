@@ -281,7 +281,7 @@ class Phase:
         lmp.command("echo              log")
         lmp.command("variable          li equal %f"%li)
         lmp.command("variable          lf equal %f"%lf)
-        lmp.command("variable          ti equal %f"%ti)
+        lmp.command("variable          ti equal %f"%t0)
         lmp.command("variable          tf equal %f"%tf)
 
         #read in conf file
