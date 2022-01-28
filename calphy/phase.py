@@ -281,8 +281,6 @@ class Phase:
         lmp.command("echo              log")
         lmp.command("variable          li equal %f"%li)
         lmp.command("variable          lf equal %f"%lf)
-        lmp.command("variable          ti equal %f"%t0)
-        lmp.command("variable          tf equal %f"%tf)
 
         #read in conf file
         conf = os.path.join(self.simfolder, "conf.dump")
@@ -329,8 +327,6 @@ class Phase:
 
         lmp.command("variable         flambda equal ramp(${li},${lf})")
         lmp.command("variable         blambda equal ramp(${lf},${li})")
-        lmp.command("variable         ftemp equal ramp(${ti},${tf})")
-        lmp.command("variable         btemp equal ramp(${tf},${ti})")
 
         lmp.command("variable         fscale equal v_flambda-1.0")
         lmp.command("variable         bscale equal v_blambda-1.0")
@@ -358,8 +354,8 @@ class Phase:
 
         #add mc fix if needed
         if self.options["md"]["swap_interval"] > 0:
-            lmp.command("fix           s1 all atom/swap %d %d %d ${ftemp} types %d %d"%(self.options["md"]["swap_interval"],
-                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), 
+            lmp.command("fix           s1 all atom/swap %d %d %d %f types %d %d"%(self.options["md"]["swap_interval"],
+                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), t0,
                 self.options["md"]["swap_type_1"], self.options["md"]["swap_type_2"]))
             lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_forward_%d.dat"%(self.options["md"]["swap_interval"],
                 iteration))
@@ -427,8 +423,8 @@ class Phase:
 
         #add mc fix if needed
         if self.options["md"]["swap_interval"] > 0:
-            lmp.command("fix           s1 all atom/swap %d %d %d ${btemp} types %d %d"%(self.options["md"]["swap_interval"],
-                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), 
+            lmp.command("fix           s1 all atom/swap %d %d %d %f types %d %d"%(self.options["md"]["swap_interval"],
+                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), t0,
                 self.options["md"]["swap_type_1"], self.options["md"]["swap_type_2"]))
             lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_backward_%d.dat"%(self.options["md"]["swap_interval"],
                 iteration))
