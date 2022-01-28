@@ -281,6 +281,8 @@ class Phase:
         lmp.command("echo              log")
         lmp.command("variable          li equal %f"%li)
         lmp.command("variable          lf equal %f"%lf)
+        lmp.command("variable          ti equal %f"%ti)
+        lmp.command("variable          tf equal %f"%tf)
 
         #read in conf file
         conf = os.path.join(self.simfolder, "conf.dump")
@@ -327,6 +329,9 @@ class Phase:
 
         lmp.command("variable         flambda equal ramp(${li},${lf})")
         lmp.command("variable         blambda equal ramp(${lf},${li})")
+        lmp.command("variable         ftemp equal ramp(${ti},${tf})")
+        lmp.command("variable         btemp equal ramp(${tf},${ti})")
+
         lmp.command("variable         fscale equal v_flambda-1.0")
         lmp.command("variable         bscale equal v_blambda-1.0")
         lmp.command("variable         one equal 1.0")
@@ -351,6 +356,14 @@ class Phase:
             lmp.command("dump              d1 all custom %d traj.forward_%d.dat id type mass x y z vx vy vz"%(self.options["md"]["traj_interval"],
                 iteration))
 
+        #add mc fix if needed
+        if self.options["md"]["swap_interval"] > 0:
+            lmp.command("fix           s1 all atom/swap %d %d %d ${ftemp} types %d %d"%(self.options["md"]["swap_interval"],
+                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), 
+                self.options["md"]["swap_type_1"], self.options["md"]["swap_type_2"]))
+            lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_forward_%d.dat"%(self.options["md"]["swap_interval"],
+                iteration))
+
         lmp.command("run               %d"%self.options["md"]["ts"])
 
         #unfix
@@ -359,6 +372,10 @@ class Phase:
 
         if self.options["md"]["traj_interval"] > 0:
             lmp.command("undump           d1")
+
+        if self.options["md"]["swap_interval"] > 0:
+            lmp.command("unfix         s1")
+            lmp.command("unfix         s2")
 
         #switch potential
         lmp = ph.set_potential(lmp, self.options)
@@ -408,6 +425,15 @@ class Phase:
             lmp.command("dump              d1 all custom %d traj.backward_%d.dat id type mass x y z vx vy vz"%(self.options["md"]["traj_interval"],
                 iteration))
 
+        #add mc fix if needed
+        if self.options["md"]["swap_interval"] > 0:
+            lmp.command("fix           s1 all atom/swap %d %d %d ${ftemp} types %d %d"%(self.options["md"]["swap_interval"],
+                self.options["md"]["swap_attempts"], np.random.randint(0, 10000), 
+                self.options["md"]["swap_type_1"], self.options["md"]["swap_type_2"]))
+            lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_backward_%d.dat"%(self.options["md"]["swap_interval"],
+                iteration))
+
+
         lmp.command("run               %d"%self.options["md"]["ts"])
         
         lmp.command("unfix             f3")
@@ -415,6 +441,10 @@ class Phase:
 
         if self.options["md"]["traj_interval"] > 0:
             lmp.command("undump           d1")
+
+        if self.options["md"]["swap_interval"] > 0:
+            lmp.command("unfix         s1")
+            lmp.command("unfix         s2")
         
         #close the object
         lmp.close()

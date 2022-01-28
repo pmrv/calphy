@@ -132,6 +132,11 @@ def read_yamlfile(file):
         "dtemp": 200,
         "maxattempts": 5,
         "traj_interval": 0,
+        #mc options
+        "swap_interval": 0,
+        "swap_attempts": 1,
+        "swap_type_1": 1,
+        "swap_type_2": 2,
     }
 
     #queue properties
