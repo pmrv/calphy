@@ -360,7 +360,7 @@ class Phase:
             lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_forward_%d.dat"%(self.options["md"]["swap_interval"],
                 iteration))
 
-        lmp.command("run               %d"%self.options["md"]["ts"])
+        lmp.command("run               %d"%self.options["md"]["ts_rs"])
 
         #unfix
         lmp.command("unfix             f3")
@@ -430,7 +430,7 @@ class Phase:
                 iteration))
 
 
-        lmp.command("run               %d"%self.options["md"]["ts"])
+        lmp.command("run               %d"%self.options["md"]["ts_rs"])
         
         lmp.command("unfix             f3")
         lmp.command("unfix             f1")
