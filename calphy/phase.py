@@ -427,7 +427,7 @@ class Phase:
         if self.options["md"]["swap_interval"] > 0:
             lmp.command("fix           s1 all atom/swap %d %d %d %f types %d %d"%(self.options["md"]["swap_interval"],
                 self.options["md"]["swap_attempts"], np.random.randint(0, 10000), t0,
-                self.options["md"]["swap_type_1"], self.options["md"]["swap_type_2"]))
+                self.options["md"]["swap_type_2"], self.options["md"]["swap_type_1"]))
             lmp.command("variable        att equal f_s1[1]")
             lmp.command("variable        acc equal f_s1[2]")
             lmp.command("fix           s2 all print %d \"$(step) ${att} ${acc}\" file mc_backward_%d.dat"%(self.options["md"]["swap_interval"],
