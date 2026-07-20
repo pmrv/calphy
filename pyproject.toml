@@ -41,6 +41,8 @@ materials-project = ["mp_api"]
 # execution_mode: library -- drives LAMMPS through pylammpsmpi instead of the
 # lmp binary. Also needs the `lammps` python module (e.g. conda-forge lammps).
 library = ["pylammpsmpi>0.4.1"]
+# optional force-constant fitting backend for the harmonic (phonon) reference
+harmonic-fit = ["hiphive", "trainstation"]
 
 [project.urls]
 Homepage = "https://github.com/ICAMS/calphy"

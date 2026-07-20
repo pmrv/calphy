@@ -333,6 +333,80 @@ class QuantumThermalBath(_StrictInput, title="Dammak quantum thermal bath (LAMMP
         description="Number of frequency bins discretising the QTB spectrum.")]
 
 
+class HarmonicReference(
+    _StrictInput, title="Harmonic (phonon) force-constant reference for solid Frenkel-Ladd"
+):
+    """
+    Replace the Einstein-crystal reference of the solid Frenkel-Ladd path
+    with a fitted harmonic force-constant crystal: the true harmonic
+    Hamiltonian E = 1/2 u^T Phi u in the atomic displacements from the
+    reference sites, with force constants fitted to displacement-force
+    data of the real potential. This coupled harmonic crystal has a real
+    phonon spectrum, so it lies much closer to the real potential than
+    independent Einstein oscillators, which reduces switching dissipation.
+    Because the Hamiltonian is exactly quadratic it is exactly solvable
+    from the force-constant eigenvalues and the switching is a single leg.
+    Its free energy is evaluated exactly by diagonalising the Hessian, and
+    the switching runs in LAMMPS through the compiled ``fix fcpot`` plugin
+    (plugins/fcpot; requires a LAMMPS built with the PLUGIN package) in
+    combination with ``pair_style hybrid/scaled``.
+    """
+
+    enabled: Annotated[bool, Field(default=False)]
+    cutoff: Annotated[float, Field(default=5.0, gt=0,
+        description="Neighbour cutoff (A) for the spring network. Should "
+                    "include at least the first two or three neighbour "
+                    "shells; must be smaller than half the box length.")]
+    n_snapshots: Annotated[int, Field(default=25, ge=5,
+        description="Number of snapshots used to fit the force constants. "
+                    "For 'leastsq'/'hiphive' these are random-displacement "
+                    "snapshots around the relaxed sites; for 'tdep' they "
+                    "are frames sampled from the equilibrated MD "
+                    "trajectory.")]
+    displacement: Annotated[float, Field(default=0.05, gt=0,
+        description="Amplitude (A) of the uniform random displacements "
+                    "applied per Cartesian component when generating "
+                    "fitting snapshots. Ignored by the 'tdep' backend, "
+                    "which samples thermal displacements from MD.")]
+    sampling_interval: Annotated[int, Field(default=100, ge=1,
+        description="MD steps between successive snapshots for the 'tdep' "
+                    "backend (spacing to decorrelate the thermal frames). "
+                    "Unused by the displacement-based backends.")]
+    distance_tolerance: Annotated[float, Field(default=0.05, gt=0,
+        description="Distance tolerance (A) for grouping pairs into "
+                    "neighbour shells (bond types).")]
+    quantum: Annotated[bool, Field(default=False,
+        description="Evaluate the reference free energy with quantum "
+                    "harmonic-oscillator statistics (zero-point energy + "
+                    "Bose-Einstein occupation) instead of classical. "
+                    "Automatically enabled with mode fe-qtb. With a "
+                    "classical thermostat this yields a one-shot "
+                    "quantum-corrected free energy: classical anharmonic "
+                    "sampling on top of a quantum harmonic baseline.")]
+    fitting_backend: Annotated[Literal["leastsq", "hiphive", "tdep"], Field(
+        default="leastsq",
+        description="'leastsq' fits shell spring constants directly by "
+                    "linear least squares (no extra dependencies). "
+                    "'hiphive' fits full second-order force constants "
+                    "with the optional hiphive package from random-"
+                    "displacement snapshots around the relaxed sites; the "
+                    "full FC2 blocks are used directly as the reference. "
+                    "'tdep' fits the same symmetry-aware full FC2 with "
+                    "hiphive but from the equilibrated MD trajectory "
+                    "(temperature-dependent effective potential): the "
+                    "reference sites are the relaxed (symmetric) lattice -- "
+                    "the thermal mean for a perfect crystal -- and only the "
+                    "fit forces come from MD, so the force constants are "
+                    "the anharmonically renormalised effective ones at the "
+                    "target state point, which minimises switching "
+                    "dissipation.")]
+    plugin_path: Annotated[Union[str, None], Field(
+        default=None,
+        description="Path to the compiled fcpotplugin.so, required "
+                    "whenever the harmonic reference is enabled. Build it "
+                    "with plugins/fcpot/build.sh.")]
+
+
 class Queue(_StrictInput, title="Options for configuring queue"):
     scheduler: Annotated[str, Field(default="local")]
     cores: Annotated[int, Field(default=1, gt=0)]
@@ -471,6 +545,7 @@ class Calculation(_StrictInput, title="Main input class"):
     nose_hoover: Optional[NoseHoover] = NoseHoover()
     berendsen: Optional[Berendsen] = Berendsen()
     quantum_thermal_bath: Optional[QuantumThermalBath] = QuantumThermalBath()
+    harmonic_reference: Optional[HarmonicReference] = HarmonicReference()
     queue: Optional[Queue] = Queue()
     tolerance: Optional[Tolerance] = Tolerance()
     phase_transition_detection: Optional[PhaseTransitionDetection] = PhaseTransitionDetection()
@@ -615,6 +690,34 @@ class Calculation(_StrictInput, title="Main input class"):
                 )
             self._qtb = True
             self.mode = "fe"
+
+        if self.harmonic_reference is not None and self.harmonic_reference.enabled:
+            if self.reference_phase and self.reference_phase.lower() == "liquid":
+                raise ValueError(
+                    "harmonic_reference is a solid (crystal) reference and "
+                    "cannot be combined with reference_phase: liquid."
+                )
+            if self.mode in ["alchemy", "composition_scaling", "melting_temperature"]:
+                raise ValueError(
+                    "harmonic_reference is only supported for the fe/ts/"
+                    "tscale/pscale modes with reference_phase: solid."
+                )
+            if self.script_mode:
+                raise ValueError(
+                    "harmonic_reference requires Python-driven fitting of "
+                    "the spring network and is not supported with "
+                    "script_mode: True."
+                )
+            if self._qtb and not self.harmonic_reference.quantum:
+                # QTB samples quantum statistics; the reference free energy
+                # must be evaluated quantum mechanically for consistency.
+                self.harmonic_reference.quantum = True
+            if not self.harmonic_reference.plugin_path:
+                raise ValueError(
+                    "harmonic_reference requires "
+                    "harmonic_reference.plugin_path (build the plugin with "
+                    "plugins/fcpot/build.sh)."
+                )
 
         self.n_elements = len(self.element)
 
