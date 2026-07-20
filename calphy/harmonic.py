@@ -232,6 +232,44 @@ def minimum_image(vectors, box):
     return vectors - box * np.round(vectors / box)
 
 
+def idealize_orthogonal_box(box, positions, rel_tol=0.02):
+    """
+    Snap near-equal orthogonal box axes to their common mean, keeping atoms
+    at their exact fractional coordinates and the box orientation fixed.
+
+    Independent per-axis pressure convergence leaves the equilibrated box
+    very slightly anisotropic (lx != ly != lz by ~0.1%), which breaks the
+    cubic/tetragonal symmetry a perfect crystal should have. hiphive's
+    symmetry finder is sensitive to this near-degeneracy and can fail to
+    build the cluster space ("Found no rotations" / "Atom not in list").
+    Restoring the intended axis equalities makes the symmetry-aware fit
+    deterministic. Axes that genuinely differ (a real tetragonal or
+    orthorhombic cell) are left untouched, so no true symmetry is imposed.
+
+    Returns ``(idealized_box, idealized_positions)``.
+    """
+    box = np.asarray(box, dtype=float)
+    frac = np.asarray(positions, dtype=float) / box
+    parent = list(range(3))
+
+    def find(a):
+        while parent[a] != a:
+            parent[a] = parent[parent[a]]
+            a = parent[a]
+        return a
+
+    mean = box.mean()
+    for i in range(3):
+        for j in range(i + 1, 3):
+            if abs(box[i] - box[j]) / mean < rel_tol:
+                parent[find(i)] = find(j)
+    newbox = box.copy()
+    for g in set(find(i) for i in range(3)):
+        members = [i for i in range(3) if find(i) == g]
+        newbox[members] = box[members].mean()
+    return newbox, frac * newbox
+
+
 def tdep_reference(positions, forces, box):
     """
     Mean atomic positions and mean force from a set of MD frames, for the
@@ -918,15 +956,25 @@ def fit_with_hiphive(model, displaced_positions, forces, base_forces=None, logge
                 "(pip install trainstation). Original error: %s" % e
             )
 
-    cell = np.diag(model.box)
+    # Symmetry-aware fits are sensitive to the tiny box anisotropy left by
+    # independent per-axis pressure convergence; snap near-equal axes so the
+    # crystal symmetry a perfect cell should have is resolved consistently.
+    # The atoms keep their fractional coordinates and the reference geometry
+    # only moves by ~0.1%, so the force constants are unchanged to that order
+    # while the fit becomes deterministic. Blocks stay indexed by the model's
+    # own atom pairs (order preserved).
+    ideal_box, ideal_ref = idealize_orthogonal_box(
+        model.box, model.reference_positions
+    )
+    cell = np.diag(ideal_box)
     ref = Atoms(
         numbers=model.types,  # chemical identity only needs to be distinct per type
-        positions=model.reference_positions,
+        positions=ideal_ref,
         cell=cell,
         pbc=True,
     )
 
-    cs = ClusterSpace(ref, [model.cutoff])
+    cs = ClusterSpace(ref, [model.cutoff], symprec=1e-4)
     sc = StructureContainer(cs)
     for pos, f in zip(displaced_positions, forces):
         disp = minimum_image(

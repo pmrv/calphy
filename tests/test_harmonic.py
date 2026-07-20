@@ -812,3 +812,46 @@ def test_tdep_sampling_command_stream(tmp_path):
     # TDEP does not minimise or impose displacements
     assert "minimize" not in script
     assert "displace_atoms" not in script
+
+
+def test_idealize_orthogonal_box():
+    from calphy.harmonic import idealize_orthogonal_box
+
+    pos = np.array([[5.0, 5.005, 4.995], [2.5, 2.5, 2.5]])
+    # near-cubic -> all three snapped to the common mean, frac coords kept
+    box = np.array([10.0, 10.01, 9.99])
+    nb, npos = idealize_orthogonal_box(box, pos)
+    assert np.allclose(nb, 10.0)
+    assert np.allclose(npos / nb, pos / box)
+    # near-tetragonal -> the two close axes snap, the distinct one is kept
+    box2 = np.array([10.0, 10.005, 12.0])
+    nb2, _ = idealize_orthogonal_box(box2, pos)
+    assert np.isclose(nb2[0], nb2[1]) and np.isclose(nb2[2], 12.0)
+    # genuine orthorhombic -> untouched (no false symmetry imposed)
+    box3 = np.array([10.0, 11.0, 12.0])
+    nb3, _ = idealize_orthogonal_box(box3, pos)
+    assert np.allclose(nb3, box3)
+
+
+def test_hiphive_robust_to_box_anisotropy():
+    """A perfect fcc crystal in a slightly anisotropic box (as left by
+    per-axis pressure convergence) must still fit -- the raw hiphive
+    ClusterSpace trips on the near-degenerate metric, the idealisation
+    fixes it."""
+    pytest.importorskip("hiphive")
+    from calphy.harmonic import fit_with_hiphive
+
+    lattice, box = make_fcc(a=3.615)
+    types = np.ones(len(lattice), dtype=int)
+    box_p = box * np.array([1.0015, 0.9989, 1.0007])  # ~0.1% anisotropy
+    ref = lattice * (box_p / box)  # exact fcc fractional coords
+    truth = HarmonicModel(ref, box_p, types, [63.546], cutoff=4.2)
+    truth.set_spring_constants([1.3, 0.45])
+    rng = np.random.default_rng(0)
+    frames = [ref + rng.normal(0, 0.05, ref.shape) for _ in range(20)]
+    forces = [truth.forces(p) for p in frames]
+
+    fit = HarmonicModel(ref, box_p, types, [63.546], cutoff=4.2)
+    fit_with_hiphive(fit, frames, forces)  # must not raise
+    assert np.allclose(fit.k_groups, [1.3, 0.45], atol=0.03)
+    assert hasattr(fit, "full_fc_blocks") and len(fit.full_fc_blocks) > 0
