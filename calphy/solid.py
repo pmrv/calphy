@@ -516,23 +516,51 @@ class Solid(cph.Phase):
             "Spring fit force RMSE %f eV/A" % model.fit_rmse
         )
 
-        # exactly-quadratic force-constant reference: no tether (a
-        # globally quadratic Hamiltonian cannot fold), no second leg
-        if hr.fitting_backend in ("hiphive", "tdep") and hasattr(
-            model, "full_fc_blocks"
-        ):
-            blocks = model.full_fc_blocks
-            self.logger.info(
-                "fcpot reference uses full FC2 blocks (%d)" % len(blocks)
-            )
+        if hr.implementation == "fcpot":
+            # exactly-quadratic force-constant reference: no tether (a
+            # globally quadratic Hamiltonian cannot fold), no second leg
+            model.set_tether(None)
+            self.harmonic_einstein_k = None
+            if hr.fitting_backend in ("hiphive", "tdep") and hasattr(
+                model, "full_fc_blocks"
+            ):
+                blocks = model.full_fc_blocks
+                self.logger.info(
+                    "fcpot reference uses full FC2 blocks (%d)" % len(blocks)
+                )
+            else:
+                blocks = model.fc_blocks(include_tether=False)
+                self.logger.info(
+                    "fcpot reference uses spring-network blocks (%d)"
+                    % len(blocks)
+                )
+            self.harmonic_fc_blocks = blocks
         else:
-            blocks = model.fc_blocks(include_tether=False)
-            self.logger.info(
-                "fcpot reference uses spring-network blocks (%d)"
-                % len(blocks)
-            )
-        self.harmonic_fc_blocks = blocks
+            # site tether: anchors the network to the reference sites so the
+            # pure-reference ensemble cannot fold/exchange sites (which would
+            # make <U_real> diverge at the reference end of the switching)
+            k_t = hr.tether_spring_constant
+            if k_t is None:
+                k_max = float(np.max(model.k_groups))
+                if k_max <= 0:
+                    raise ValueError(
+                        "All fitted spring constants are non-positive; cannot "
+                        "derive a tether constant. Check the fit or set "
+                        "harmonic_reference.tether_spring_constant explicitly."
+                    )
+                k_t = hr.tether_fraction * k_max
+            model.set_tether(k_t)
+            self.logger.info("Site tether constant %f eV/A^2" % k_t)
 
+            # Einstein anchor constants for the analytic endpoint of the
+            # second switching leg, amplitude-matched to the network
+            self.harmonic_einstein_k = model.einstein_anchor_constants(
+                self.calc._temperature
+            )
+            self.logger.info(
+                "Einstein anchor constants (leg 2 endpoint): %s eV/A^2"
+                % np.round(self.harmonic_einstein_k, 4)
+            )
         for g, grp in enumerate(model.groups):
             self.logger.info(
                 "bond type %d: types (%d, %d), r0 %f A, k %f eV/A^2, %d springs"
@@ -553,10 +581,13 @@ class Solid(cph.Phase):
                 )
 
         # frequencies; raises if the network is not a stable crystal
-        from calphy.harmonic import hessian_from_blocks, frequencies_from_hessian
+        if hr.implementation == "fcpot":
+            from calphy.harmonic import hessian_from_blocks, frequencies_from_hessian
 
-        H_fc = hessian_from_blocks(model.natoms, self.harmonic_fc_blocks)
-        omega = frequencies_from_hessian(H_fc, model.masses, tethered=False)
+            H_fc = hessian_from_blocks(model.natoms, self.harmonic_fc_blocks)
+            omega = frequencies_from_hessian(H_fc, model.masses, tethered=False)
+        else:
+            omega = model.frequencies()
         thz = omega / (2 * np.pi) / 1e12
         self.logger.info(
             "Phonon spectrum of reference: %f - %f THz over %d modes"
@@ -590,26 +621,27 @@ class Solid(cph.Phase):
 
         # artefacts for the integration stage and for post-processing
         model.save(os.path.join(self.simfolder, "harmonic.model.npz"))
-        from calphy.harmonic import write_fc_file
+        if hr.implementation == "fcpot":
+            from calphy.harmonic import write_fc_file
 
-        write_fc_file(
-            os.path.join(self.simfolder, "harmonic.fc"),
-            model.ids,
-            model.reference_positions,
-            self.harmonic_fc_blocks,
-            comment="(%s blocks)" % hr.fitting_backend,
-        )
-        bi = np.array([b[0] for b in self.harmonic_fc_blocks])
-        bj = np.array([b[1] for b in self.harmonic_fc_blocks])
-        bb = np.array(
-            [np.asarray(b[2]).reshape(9) for b in self.harmonic_fc_blocks]
-        )
-        np.savez_compressed(
-            os.path.join(self.simfolder, "harmonic.fcblocks.npz"),
-            bi=bi,
-            bj=bj,
-            blocks=bb,
-        )
+            write_fc_file(
+                os.path.join(self.simfolder, "harmonic.fc"),
+                model.ids,
+                model.reference_positions,
+                self.harmonic_fc_blocks,
+                comment="(%s blocks)" % hr.fitting_backend,
+            )
+            bi = np.array([b[0] for b in self.harmonic_fc_blocks])
+            bj = np.array([b[1] for b in self.harmonic_fc_blocks])
+            bb = np.array(
+                [np.asarray(b[2]).reshape(9) for b in self.harmonic_fc_blocks]
+            )
+            np.savez_compressed(
+                os.path.join(self.simfolder, "harmonic.fcblocks.npz"),
+                bi=bi,
+                bj=bj,
+                blocks=bb,
+            )
         np.savetxt(
             os.path.join(self.simfolder, "harmonic.frequencies.dat"),
             np.column_stack((thz, omega * 6.582119569e-16 * 1e3)),
@@ -787,6 +819,68 @@ class Solid(cph.Phase):
             "fcpot reference consistency check passed (%.6f eV)" % e_lmp
         )
 
+    def _ghost_safe_pair_coeff_commands(self):
+        """
+        Pair-coeff commands for the real potential that exclude the ghost
+        anchor type. Element-mapped many-body styles (eam/alloy, meam,
+        snap, pace, ...) get a trailing NULL for the extra type; styles
+        with purely numeric coefficients get their type wildcards
+        restricted to the real atom types.
+        """
+
+        def _is_number(token):
+            try:
+                float(token)
+                return True
+            except ValueError:
+                return False
+
+        n_real = self.calc.n_elements
+        commands = []
+        for command in ph.hybrid_pair_coeff_commands(self.calc):
+            raw = command.split()
+            if not _is_number(raw[-1]):
+                # ends in an element name: element-mapped style
+                commands.append(command + " NULL")
+            else:
+                for idx in (1, 2):
+                    if raw[idx] == "*":
+                        raw[idx] = "*%d" % n_real
+                commands.append(" ".join(raw))
+        return commands
+
+    def _verify_harmonic_energies(self, checkfile, positions, k_einstein):
+        """
+        Compare the LAMMPS-evaluated unscaled reference bond energies
+        against the python model at the same configuration. Catches any
+        silent inconsistency between the intended reference Hamiltonian
+        and what LAMMPS actually computes (missing bonds, wrong
+        coefficients, periodic-image errors, ...).
+        """
+        if not os.path.exists(checkfile):
+            # script-collection mode: commands were not executed
+            return
+        vals = np.loadtxt(checkfile, ndmin=1)
+        e_harm_lmp, e_ein_lmp = float(vals[0]), float(vals[1])
+        e_harm_py, e_ein_py = self.harmonic_model.reference_energies(
+            positions, k_einstein
+        )
+        scale = max(abs(e_harm_py), abs(e_ein_py), 1.0)
+        if (
+            abs(e_harm_lmp - e_harm_py) > 1e-5 * scale
+            or abs(e_ein_lmp - e_ein_py) > 1e-5 * scale
+        ):
+            raise RuntimeError(
+                "Reference Hamiltonian consistency check failed: LAMMPS "
+                "bond energies (%.8f, %.8f) do not match the python model "
+                "(%.8f, %.8f). The switching would measure the wrong "
+                "Hamiltonian." % (e_harm_lmp, e_ein_lmp, e_harm_py, e_ein_py)
+            )
+        self.logger.info(
+            "Reference Hamiltonian consistency check passed "
+            "(network+tether %.6f eV, Einstein %.6f eV)" % (e_harm_lmp, e_ein_lmp)
+        )
+
     def _restore_harmonic_model(self):
         """
         Reload the fitted spring model from disk (e.g. when
@@ -796,21 +890,272 @@ class Solid(cph.Phase):
             os.path.join(self.simfolder, "harmonic.model.npz")
         )
         self.harmonic_model = model
-        from calphy.harmonic import hessian_from_blocks, frequencies_from_hessian
+        if self.calc.harmonic_reference.implementation == "fcpot":
+            from calphy.harmonic import hessian_from_blocks, frequencies_from_hessian
 
-        data = np.load(os.path.join(self.simfolder, "harmonic.fcblocks.npz"))
-        self.harmonic_fc_blocks = [
-            (int(i), int(j), b.reshape(3, 3))
-            for i, j, b in zip(data["bi"], data["bj"], data["blocks"])
-        ]
-        H_fc = hessian_from_blocks(model.natoms, self.harmonic_fc_blocks)
-        omega = frequencies_from_hessian(H_fc, model.masses, tethered=False)
+            data = np.load(os.path.join(self.simfolder, "harmonic.fcblocks.npz"))
+            self.harmonic_fc_blocks = [
+                (int(i), int(j), b.reshape(3, 3))
+                for i, j, b in zip(data["bi"], data["bj"], data["blocks"])
+            ]
+            model.set_tether(None)
+            H_fc = hessian_from_blocks(model.natoms, self.harmonic_fc_blocks)
+            omega = frequencies_from_hessian(H_fc, model.masses, tethered=False)
+            self.harmonic_einstein_k = None
+        else:
+            omega = model.frequencies()
+            self.harmonic_einstein_k = model.einstein_anchor_constants(
+                self.calc._temperature
+            )
         self.harmonic_fe_classical = model.free_energy(
             self.calc._temperature, quantum=False, omega=omega
         )
         self.harmonic_fe_quantum = model.free_energy(
             self.calc._temperature, quantum=True, omega=omega
         )
+
+    def run_harmonic_integration(self, iteration=1):
+        """
+        Two-leg nonequilibrium Hamiltonian interpolation:
+
+        leg 1: real potential  <->  tethered spring network
+        leg 2: tethered spring network  <->  Einstein crystal (analytic)
+
+        The reference Hamiltonians are realised as LAMMPS *bonds* (whose
+        topology machinery handles periodic images correctly, unlike
+        pair_style list): network springs and the site tether as
+        ``bond_style harmonic`` types, and per-element Einstein anchor
+        bonds as ``bond_style class2`` types (with K3 = K4 = 0, i.e.
+        exactly K r^2) duplicated on the same atom-anchor pairs. One
+        frozen ghost anchor atom per real atom (an extra atom type,
+        excluded from the real potential, never time-integrated) sits at
+        each reference site.
+
+        The real potential is scaled with ``pair_style hybrid/scaled``;
+        the bond coefficients are scaled every step with ``fix adapt``.
+        Since bond energies are linear in their coefficients, dividing
+        the (scaled) per-substyle energies from ``compute bond`` by the
+        known scale factors recovers the unscaled reference energies
+        exactly.
+
+        The second leg makes the scheme exact regardless of the
+        anharmonicity of the distance-based spring network: the network
+        free energy cancels between the legs, and the analytic anchor is
+        the exactly-quadratic Einstein crystal (amplitude-matched to the
+        network), evaluated with calphy's standard Einstein-crystal
+        formula. Stage sequence (one continuous simulation):
+
+        eq(real) -> leg1 fwd -> eq(network) -> leg2 fwd -> eq(Einstein)
+        -> leg2 bkd -> eq(network) -> leg1 bkd
+
+        writing forward/backward_leg{1,2}_<iter>.dat files compatible
+        with :func:`calphy.integrators.find_w` (solid=False layout).
+        """
+        lmp = ph.create_object(self.calc, self.simfolder)
+
+        model = self.harmonic_model
+        hr = self.calc.harmonic_reference
+        T = self.calc._temperature
+        tdamp = self.calc.md.thermostat_damping[1]
+        n_el = self.calc.n_elements
+        ghost_type = n_el + 1
+        n_groups = model.n_groups
+        K_E = self.harmonic_einstein_k
+
+        # bond-topology data file: real atoms at the thermal positions of
+        # conf.equilibration.data + frozen ghost anchors + bonds
+        conf = os.path.join(self.simfolder, "conf.equilibration.data")
+        therm = read_lammps_data(conf)
+        if not np.allclose(therm["box"], model.box, atol=1e-3):
+            raise RuntimeError(
+                "Box of %s (%s) does not match the harmonic reference box "
+                "(%s)." % (conf, therm["box"], model.box)
+            )
+        bond_data = os.path.join(self.simfolder, "conf.harmonic.data")
+        model.write_bond_data(bond_data, therm["positions"])
+
+        lmp.command("atom_style       bond")
+        # keep full pair interactions between bonded atoms; required for
+        # many-body potentials and correct for this reference
+        lmp.command("special_bonds    lj/coul 1.0 1.0 1.0")
+
+        # stage-control variables (redefined between stages)
+        lmp.command("variable         li equal 1.0")
+        lmp.command("variable         lf equal 0.0")
+        lmp.command("variable         flambda equal 0.0")
+        lmp.command("variable         blambda equal 1.0-v_flambda")
+        lmp.command("variable         mu equal 1.0")
+        # scale of the network+tether (harmonic bonds) and of the
+        # Einstein anchor bonds (class2); leg 1 uses (1-lambda, 0),
+        # leg 2 uses (mu, 1-mu)
+        lmp.command("variable         refscale equal 1.0-v_flambda")
+        lmp.command("variable         einscale equal 1.0")
+
+        lmp.command(
+            ph.scaled_pair_style_command(
+                self.calc, ["v_flambda"], extra_terms=["1.0 zero 2.0"]
+            )
+        )
+        lmp.command("read_data        %s" % bond_data)
+
+        for command in self._ghost_safe_pair_coeff_commands():
+            lmp.command(command)
+        lmp.command("pair_coeff       * * zero")
+
+        lmp.command("bond_style       hybrid harmonic class2")
+        for command in model.bond_coeff_commands(K_E):
+            lmp.command(command)
+
+        real_types = " ".join([str(i + 1) for i in range(n_el)])
+        lmp.command("group            real type %s" % real_types)
+        lmp.command("group            ghost type %d" % ghost_type)
+        lmp.command("variable         nreal equal count(real)")
+
+        # scaled bond coefficients, applied every step
+        lmp.command(
+            "fix              fad all adapt 1 bond harmonic k 1*%d v_refscale "
+            "bond class2 k2 %d*%d v_einscale scale yes reset yes"
+            % (n_groups + 1, n_groups + 2, n_groups + 1 + n_el)
+        )
+
+        compute_commands, real_energy, compute_ids = ph.real_pair_compute_commands(
+            self.calc
+        )
+        for command in compute_commands:
+            lmp.command(command)
+        # per-substyle bond energies: [1] harmonic (network+tether),
+        # [2] class2 (Einstein anchors); scaled values, exact unscaled
+        # recovery by dividing by the (linear) scale factors
+        lmp.command("compute          cb all bond")
+
+        lmp.command("variable         step equal step")
+        lmp.command("variable         dU1 equal (%s)/v_nreal" % real_energy)
+        lmp.command(
+            "variable         dU2 equal c_cb[1]/(v_refscale+1.0e-12)/v_nreal"
+        )
+        lmp.command(
+            "variable         dU3 equal c_cb[2]/(v_einscale+1.0e-12)/v_nreal"
+        )
+
+        lmp.command("compute          Tcm real temp/com")
+        lmp.command("thermo_style     custom step v_dU1 v_dU2 v_dU3 c_Tcm")
+        lmp.command("thermo           1000")
+
+        # start-up consistency check: unscaled reference energies from
+        # LAMMPS vs the python model at the initial configuration
+        lmp.command("variable         eb1 equal c_cb[1]")
+        lmp.command("variable         eb2 equal c_cb[2]")
+        lmp.command("run              0")
+        checkfile = os.path.join(self.simfolder, "harmonic.check.dat")
+        lmp.command('print            "${eb1} ${eb2}" file %s screen no' % checkfile)
+        self._verify_harmonic_energies(checkfile, therm["positions"], K_E)
+
+        lmp.command(
+            "velocity         real create %f %d mom yes rot yes dist gaussian"
+            % (T, np.random.randint(1, 10000))
+        )
+
+        # integrate and thermostat the real atoms only; ghosts never move
+        lmp.command("fix              f1 real nve")
+        if self.calc._qtb:
+            qtb = self.calc.quantum_thermal_bath
+            lmp.command(
+                "fix              f2 real qtb temp %f damp %f seed %d f_max %f N_f %d"
+                % (
+                    T,
+                    qtb.thermostat_damping,
+                    np.random.randint(1, 10**8),
+                    qtb.f_max,
+                    qtb.n_f,
+                )
+            )
+        else:
+            lmp.command(
+                "fix              f2 real langevin %f %f %f %d zero yes"
+                % (T, T, tdamp, np.random.randint(1, 10000))
+            )
+            lmp.command("fix_modify       f2 temp Tcm")
+
+        def leg1_vars():
+            lmp.command("variable         refscale equal 1.0-v_flambda")
+            lmp.command("variable         einscale equal 0.0")
+
+        def leg2_vars():
+            lmp.command("variable         flambda equal 0.0")
+            lmp.command("variable         refscale equal v_mu")
+            lmp.command("variable         einscale equal 1.0-v_mu")
+
+        def print_fix(cols, filename):
+            lmp.command(
+                'fix              f3 all print 1 "%s" screen no file %s'
+                % (cols, filename)
+            )
+
+        # equilibrate on the real potential (lambda = 1)
+        leg1_vars()
+        lmp.command("variable         flambda equal 1.0")
+        lmp.command("run              %d" % self.calc.n_equilibration_steps)
+
+        # leg 1 FWD: real -> network+tether
+        lmp.command("variable         flambda equal ramp(${li},${lf})")
+        print_fix(
+            "${dU1} ${dU2} ${flambda}", "forward_leg1_%d.dat" % iteration
+        )
+        lmp.command("run              %d" % self.calc._n_switching_steps)
+        lmp.command("unfix            f3")
+
+        # equilibrate on the reference (lambda = 0)
+        lmp.command("variable         flambda equal 0.0")
+        lmp.command("run              %d" % self.calc.n_equilibration_steps)
+
+        # leg 2 FWD: network+tether -> Einstein anchors
+        leg2_vars()
+        lmp.command("variable         mu equal ramp(${li},${lf})")
+        print_fix("${dU2} ${dU3} ${mu}", "forward_leg2_%d.dat" % iteration)
+        lmp.command("run              %d" % self.calc._n_switching_steps)
+        lmp.command("unfix            f3")
+
+        # equilibrate on the Einstein crystal (mu = 0)
+        lmp.command("variable         mu equal 0.0")
+        lmp.command("run              %d" % self.calc.n_equilibration_steps)
+
+        # leg 2 BKD: Einstein anchors -> network+tether
+        lmp.command("variable         mu equal ramp(${lf},${li})")
+        print_fix("${dU2} ${dU3} ${mu}", "backward_leg2_%d.dat" % iteration)
+        lmp.command("run              %d" % self.calc._n_switching_steps)
+        lmp.command("unfix            f3")
+
+        # equilibrate on the reference again (mu = 1)
+        lmp.command("variable         mu equal 1.0")
+        lmp.command("run              %d" % self.calc.n_equilibration_steps)
+
+        # leg 1 BKD: network+tether -> real
+        leg1_vars()
+        lmp.command("variable         flambda equal ramp(${lf},${li})")
+        print_fix(
+            "${dU1} ${dU2} ${flambda}", "backward_leg1_%d.dat" % iteration
+        )
+        lmp.command("run              %d" % self.calc._n_switching_steps)
+        lmp.command("unfix            f3")
+
+        lmp.command("unfix            f1")
+        lmp.command("unfix            f2")
+        lmp.command("unfix            fad")
+        for compute_id in compute_ids:
+            lmp.command("uncompute        %s" % compute_id)
+        lmp.command("uncompute        cb")
+
+        # close object
+        self.lammps_close(lmp=lmp)
+        # Preserve log file
+        logfile = os.path.join(self.simfolder, "log.lammps")
+        try:
+            if os.path.exists(logfile):
+                os.rename(
+                    logfile, os.path.join(self.simfolder, "integration.log.lammps")
+                )
+        except OSError as e:
+            self.logger.warning(f"Failed to rename log file: {e}")
 
     def run_integration(self, iteration=1):
         """
@@ -833,7 +1178,9 @@ class Solid(cph.Phase):
         if self._use_harmonic_reference:
             if not hasattr(self, "harmonic_model"):
                 self._restore_harmonic_model()
-            return self.run_fcpot_integration(iteration=iteration)
+            if self.calc.harmonic_reference.implementation == "fcpot":
+                return self.run_fcpot_integration(iteration=iteration)
+            return self.run_harmonic_integration(iteration=iteration)
 
         lmp = ph.create_object(self.calc, self.simfolder)
 
@@ -1096,16 +1443,18 @@ class Solid(cph.Phase):
 
     def _harmonic_thermodynamic_integration(self):
         """
-        Free energy assembly for the single-leg harmonic (phonon)
-        force-constant reference path:
+        Free energy assembly for the two-leg harmonic (phonon) reference
+        path:
 
-            F_real = F_fc - w (+ pV)
+            F_real = F_Einstein(analytic) - w_leg1 - w_leg2 (+ pV)
 
-        A single leg switches the real potential to the exactly-quadratic
-        force-constant reference E = 1/2 u^T Phi u, whose free energy F_fc
-        is exact from its eigenvalues (classical or quantum, including the
-        Frenkel-Smit centre-of-mass correction). The quality of the fit
-        controls only the switching dissipation, never the correctness.
+        Leg 1 switches the real potential to the tethered spring network
+        and leg 2 switches the network to the amplitude-matched Einstein
+        crystal, whose free energy is evaluated with calphy's standard
+        Einstein-crystal formula (classical or quantum). The network's
+        own (anharmonic) free energy cancels between the legs, so the
+        result is exact regardless of the quality of the spring fit —
+        the fit only controls dissipation.
         """
         if not hasattr(self, "harmonic_model"):
             self._restore_harmonic_model()
@@ -1120,18 +1469,56 @@ class Solid(cph.Phase):
                     "on top of a quantum harmonic baseline)."
                 )
 
-        # single leg against the exactly-quadratic force-constant
-        # reference, whose free energy is exact from its eigenvalues
-        w, q, qerr = find_w(self.simfolder, self.calc, full=True, solid=False)
-        fe_dict = (
-            self.harmonic_fe_quantum if quantum else self.harmonic_fe_classical
-        )
-        self.fref = fe_dict["f_total"]
-        self.feinstein = fe_dict["f_modes"]
-        self.fcm = fe_dict["f_com"]
-        self.w = w
-        self.ferr = qerr
+        if self.calc.harmonic_reference.implementation == "fcpot":
+            # single leg against the exactly-quadratic force-constant
+            # reference, whose free energy is exact from its eigenvalues
+            w, q, qerr = find_w(self.simfolder, self.calc, full=True, solid=False)
+            fe_dict = (
+                self.harmonic_fe_quantum if quantum else self.harmonic_fe_classical
+            )
+            self.fref = fe_dict["f_total"]
+            self.feinstein = fe_dict["f_modes"]
+            self.fcm = fe_dict["f_com"]
+            self.w = w
+            self.ferr = qerr
 
+            if self.calc._pressure != 0:
+                p = self.calc._pressure / EV_A3_TO_BAR
+                v = self.vol / self.natoms
+                self.pv = p * v
+            else:
+                self.pv = 0
+
+            self.fe = self.fref - self.w + self.pv
+            return
+
+        w1, q1, qerr1 = find_w(
+            self.simfolder, self.calc, full=True, solid=False, prefix="leg1"
+        )
+        w2, q2, qerr2 = find_w(
+            self.simfolder, self.calc, full=True, solid=False, prefix="leg2"
+        )
+        self.w_leg1 = w1
+        self.w_leg2 = w2
+
+        # analytic Einstein anchor: calphy convention k = curvature =
+        # 2 K_E (our anchor bonds are E = K_E r^2)
+        k_curv = [2.0 * k for k in self.harmonic_einstein_k]
+        fe, fcm = get_einstein_crystal_fe(
+            self.calc,
+            self.vol,
+            k_curv,
+            return_contributions=True,
+            quantum=quantum,
+        )
+
+        self.fref = fe + fcm
+        self.feinstein = fe
+        self.fcm = fcm
+        self.w = w1 + w2
+        self.ferr = np.sqrt(qerr1**2 + qerr2**2)
+
+        # add pressure contribution if required
         if self.calc._pressure != 0:
             p = self.calc._pressure / EV_A3_TO_BAR
             v = self.vol / self.natoms
@@ -1139,6 +1526,7 @@ class Solid(cph.Phase):
         else:
             self.pv = 0
 
+        # calculate final free energy
         self.fe = self.fref - self.w + self.pv
 
     def submit_report(self, extra_dict=None):
@@ -1163,8 +1551,25 @@ class Solid(cph.Phase):
                             [g["distance"] for g in model.groups], decimals=4
                         ).astype(str)
                     ),
+                    "implementation": str(
+                        self.calc.harmonic_reference.implementation
+                    ),
+                    "tether_constant": (
+                        float(model.tether_k) if model.tether_k is not None else 0.0
+                    ),
+                    "einstein_anchor_constants": (
+                        " ".join(
+                            np.round(
+                                self.harmonic_einstein_k, decimals=6
+                            ).astype(str)
+                        )
+                        if self.harmonic_einstein_k is not None
+                        else "n/a"
+                    ),
                     "fit_rmse": float(getattr(model, "fit_rmse", 0.0)),
                     "frequency_range_THz": "%f %f" % (thz[0], thz[-1]),
+                    "work_leg1": float(getattr(self, "w_leg1", 0.0)),
+                    "work_leg2": float(getattr(self, "w_leg2", 0.0)),
                     "network_harmonic_fe_classical": float(
                         self.harmonic_fe_classical["f_total"]
                     ),

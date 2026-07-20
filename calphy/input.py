@@ -334,21 +334,18 @@ class QuantumThermalBath(_StrictInput, title="Dammak quantum thermal bath (LAMMP
 
 
 class HarmonicReference(
-    _StrictInput, title="Harmonic (phonon) force-constant reference for solid Frenkel-Ladd"
+    _StrictInput, title="Harmonic (phonon) spring-network reference for solid Frenkel-Ladd"
 ):
     """
     Replace the Einstein-crystal reference of the solid Frenkel-Ladd path
-    with a fitted harmonic force-constant crystal: the true harmonic
-    Hamiltonian E = 1/2 u^T Phi u in the atomic displacements from the
-    reference sites, with force constants fitted to displacement-force
-    data of the real potential. This coupled harmonic crystal has a real
-    phonon spectrum, so it lies much closer to the real potential than
-    independent Einstein oscillators, which reduces switching dissipation.
-    Because the Hamiltonian is exactly quadratic it is exactly solvable
-    from the force-constant eigenvalues and the switching is a single leg.
-    Its free energy is evaluated exactly by diagonalising the Hessian, and
-    the switching runs in LAMMPS through the compiled ``fix fcpot`` plugin
-    (plugins/fcpot; requires a LAMMPS built with the PLUGIN package) in
+    with a fitted Born-von Karman spring network: pairwise harmonic
+    springs between neighbour shells, fitted to displacement-force data
+    of the real potential. The network is a coupled harmonic crystal with
+    a real phonon spectrum, so it lies much closer to the real potential
+    than independent Einstein oscillators, which reduces switching
+    dissipation. Its free energy is evaluated exactly by diagonalising
+    the network Hessian, and the switching runs natively in LAMMPS via
+    ``pair_style list`` (requires LAMMPS built with the MISC package) in
     combination with ``pair_style hybrid/scaled``.
     """
 
@@ -375,6 +372,18 @@ class HarmonicReference(
     distance_tolerance: Annotated[float, Field(default=0.05, gt=0,
         description="Distance tolerance (A) for grouping pairs into "
                     "neighbour shells (bond types).")]
+    tether_fraction: Annotated[float, Field(default=0.5, gt=0,
+        description="The reference includes a weak Einstein tether "
+                    "anchoring each atom to its reference site, "
+                    "k_t = tether_fraction * max(fitted spring constant). "
+                    "The tether confines the otherwise translation-"
+                    "invariant network (preventing collective folding and "
+                    "site exchange, which would make the switching "
+                    "integrand diverge) while the network carries the "
+                    "phonon dispersion.")]
+    tether_spring_constant: Annotated[Union[float, None], Field(default=None, gt=0,
+        description="Absolute tether constant k_t in eV/A^2; overrides "
+                    "tether_fraction if given.")]
     quantum: Annotated[bool, Field(default=False,
         description="Evaluate the reference free energy with quantum "
                     "harmonic-oscillator statistics (zero-point energy + "
@@ -389,8 +398,7 @@ class HarmonicReference(
                     "linear least squares (no extra dependencies). "
                     "'hiphive' fits full second-order force constants "
                     "with the optional hiphive package from random-"
-                    "displacement snapshots around the relaxed sites; the "
-                    "full FC2 blocks are used directly as the reference. "
+                    "displacement snapshots around the relaxed sites. "
                     "'tdep' fits the same symmetry-aware full FC2 with "
                     "hiphive but from the equilibrated MD trajectory "
                     "(temperature-dependent effective potential): the "
@@ -399,12 +407,25 @@ class HarmonicReference(
                     "fit forces come from MD, so the force constants are "
                     "the anharmonically renormalised effective ones at the "
                     "target state point, which minimises switching "
-                    "dissipation.")]
+                    "dissipation. With implementation 'fcpot' the full FC2 "
+                    "blocks are used directly; with 'bonds' they are "
+                    "projected onto the spring network.")]
+    implementation: Annotated[Literal["bonds", "fcpot"], Field(
+        default="bonds",
+        description="'bonds' runs the reference with stock-LAMMPS bond "
+                    "styles (tethered spring network, two-leg path to an "
+                    "analytic Einstein anchor). 'fcpot' uses the compiled "
+                    "fcpot plugin (plugins/fcpot) that evaluates the true "
+                    "harmonic Hamiltonian 1/2 u^T Phi u — exactly "
+                    "quadratic in the displacements, hence exactly "
+                    "solvable, needing neither tether nor second leg; "
+                    "requires plugin_path and a LAMMPS with the PLUGIN "
+                    "package.")]
     plugin_path: Annotated[Union[str, None], Field(
         default=None,
-        description="Path to the compiled fcpotplugin.so, required "
-                    "whenever the harmonic reference is enabled. Build it "
-                    "with plugins/fcpot/build.sh.")]
+        description="Path to the compiled fcpotplugin.so, required for "
+                    "implementation 'fcpot'. Build it with "
+                    "plugins/fcpot/build.sh.")]
 
 
 class Queue(_StrictInput, title="Options for configuring queue"):
@@ -712,9 +733,12 @@ class Calculation(_StrictInput, title="Main input class"):
                 # QTB samples quantum statistics; the reference free energy
                 # must be evaluated quantum mechanically for consistency.
                 self.harmonic_reference.quantum = True
-            if not self.harmonic_reference.plugin_path:
+            if (
+                self.harmonic_reference.implementation == "fcpot"
+                and not self.harmonic_reference.plugin_path
+            ):
                 raise ValueError(
-                    "harmonic_reference requires "
+                    "harmonic_reference.implementation 'fcpot' requires "
                     "harmonic_reference.plugin_path (build the plugin with "
                     "plugins/fcpot/build.sh)."
                 )

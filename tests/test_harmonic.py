@@ -210,6 +210,141 @@ def test_com_term_is_small_and_negative(fcc_model):
     assert abs(res["f_com"]) < 0.05  # eV/atom, finite-size term
 
 
+# ----------------------------------------------------------------------
+# site tether
+# ----------------------------------------------------------------------
+
+
+def test_tether_eigenvalue_shift(fcc_model):
+    """For equal masses, the tether shifts every eigenvalue of the
+    mass-weighted Hessian by exactly 2 k_t / m."""
+    from calphy.harmonic import OMEGA2_TO_SI
+
+    fcc_model.set_spring_constants([1.2, 0.4])
+    omega_free = fcc_model.frequencies()  # 3N-3 finite modes
+
+    k_t = 0.3
+    m = 26.98
+    fcc_model.set_tether(k_t)
+    omega_teth = fcc_model.frequencies()  # all 3N modes
+    n = fcc_model.natoms
+    assert len(omega_teth) == 3 * n
+
+    shift = 2 * k_t / m * OMEGA2_TO_SI
+    expected = np.sort(
+        np.concatenate((np.zeros(3), omega_free**2)) + shift
+    )
+    assert np.allclose(omega_teth**2, expected, rtol=1e-8)
+
+
+def test_tether_stabilises_unstable_network(fcc_model):
+    """A network with negative springs that is unstable on its own can be
+    made positive definite by a sufficiently stiff tether."""
+    fcc_model.set_spring_constants([-0.05, -0.05])
+    with pytest.raises(ValueError):
+        fcc_model.frequencies()
+    fcc_model.set_tether(5.0)
+    omega = fcc_model.frequencies()
+    assert np.all(omega > 0)
+
+
+def test_tether_com_correction_einstein_form(fcc_model):
+    fcc_model.set_spring_constants([1.2, 0.4])
+    fcc_model.set_tether(0.3)
+    res = fcc_model.free_energy(600.0)
+    # Frenkel-Smit CM correction: small negative eV/atom value at this size
+    assert res["f_com"] < 0
+    assert abs(res["f_com"]) < 0.05
+    assert res["f_total"] == pytest.approx(res["f_modes"] + res["f_com"])
+
+
+def test_save_load_roundtrip_with_tether(fcc_model, tmp_path):
+    fcc_model.set_spring_constants([1.2, 0.4])
+    fcc_model.set_tether(0.25)
+    fn = str(tmp_path / "model.npz")
+    fcc_model.save(fn)
+    from calphy.harmonic import HarmonicModel
+
+    loaded = HarmonicModel.load(fn)
+    assert loaded.tether_k == pytest.approx(0.25)
+    assert np.allclose(loaded.frequencies(), fcc_model.frequencies(), rtol=1e-10)
+
+
+# ----------------------------------------------------------------------
+# LAMMPS file IO
+# ----------------------------------------------------------------------
+
+
+def test_write_bond_data_and_coeffs(fcc_model, tmp_path):
+    fcc_model.set_spring_constants([1.2, 0.4])
+    fcc_model.set_tether(0.3)
+    n = fcc_model.natoms
+    k_ein = fcc_model.einstein_anchor_constants(600.0)
+
+    fn = tmp_path / "conf.harmonic.data"
+    thermal = fcc_model.reference_positions + 0.01
+    fcc_model.write_bond_data(str(fn), thermal)
+    text = fn.read_text()
+    assert "%d atoms" % (2 * n) in text
+    assert "2 atom types" in text
+    # G network types + tether + one Einstein type per element
+    assert "%d bond types" % (2 + 1 + 1) in text
+    assert "%d bonds" % (len(fcc_model.pairs) + 2 * n) in text
+
+    # bonds section sanity: tether and einstein bonds connect id i to
+    # ghost id offset+i
+    lines = text.splitlines()
+    start = lines.index("Bonds") + 2
+    bonds = [tuple(int(x) for x in l.split()) for l in lines[start:] if l.strip()]
+    assert len(bonds) == len(fcc_model.pairs) + 2 * n
+    offset = fcc_model.ghost_id_offset
+    tether_bonds = [b for b in bonds if b[1] == 3]
+    ein_bonds = [b for b in bonds if b[1] == 4]
+    assert len(tether_bonds) == n
+    assert len(ein_bonds) == n
+    for b in tether_bonds + ein_bonds:
+        assert b[3] == b[2] + offset
+
+    cmds = fcc_model.bond_coeff_commands(k_ein)
+    assert len(cmds) == 4
+    assert "harmonic 1.2" in cmds[0].replace("000000000", "")
+    assert cmds[2].split()[2] == "harmonic"  # tether
+    assert float(cmds[2].split()[3]) == pytest.approx(0.3)
+    assert float(cmds[2].split()[4]) == 0.0
+    assert cmds[3].split()[2] == "class2"
+    assert float(cmds[3].split()[3]) == 0.0  # r0
+    assert float(cmds[3].split()[4]) == pytest.approx(k_ein[0])
+    assert float(cmds[3].split()[5]) == 0.0  # K3
+    assert float(cmds[3].split()[6]) == 0.0  # K4
+
+
+def test_einstein_anchor_constants_tether_only_limit(fcc_model):
+    """With zero network springs, H = 2 k_t I, so <u^2> = 3kT/(2 k_t)
+    and the amplitude-matched anchor constant is exactly k_t."""
+    fcc_model.set_spring_constants([0.0, 0.0])
+    fcc_model.set_tether(0.7)
+    K_E = fcc_model.einstein_anchor_constants(600.0)
+    assert K_E[0] == pytest.approx(0.7, rel=1e-10)
+
+
+def test_reference_energies(fcc_model):
+    fcc_model.set_spring_constants([1.2, 0.4])
+    fcc_model.set_tether(0.3)
+    k_ein = np.array([2.0])
+    rng = np.random.default_rng(5)
+    disp = rng.uniform(-0.1, 0.1, size=(fcc_model.natoms, 3))
+    pos = fcc_model.reference_positions + disp
+    e_harm, e_ein = fcc_model.reference_energies(pos, k_ein)
+    u2 = np.sum(disp**2)
+    assert e_ein == pytest.approx(2.0 * u2, rel=1e-10)
+    assert e_harm == pytest.approx(fcc_model.energy(pos) + 0.3 * u2, rel=1e-10)
+    # at the reference both vanish
+    e_harm0, e_ein0 = fcc_model.reference_energies(
+        fcc_model.reference_positions, k_ein
+    )
+    assert abs(e_harm0) < 1e-10 and abs(e_ein0) < 1e-10
+
+
 def test_read_lammps_data(tmp_path):
     content = """conf (written by test)
 
@@ -464,7 +599,6 @@ def test_input_enable_and_options(tmp_path):
         "n_snapshots": 10,
         "displacement": 0.03,
         "quantum": True,
-        "plugin_path": "/opt/fcpotplugin.so",
     }
     fn = _write_yaml(tmp_path, {"calculations": [calc]})
     [opts] = read_inputfile(fn)
@@ -507,7 +641,7 @@ def test_input_rejects_alchemy(tmp_path):
 
 def test_input_fcpot_requires_plugin_path(tmp_path):
     calc = _base_calc()
-    calc["harmonic_reference"] = {"enabled": True}
+    calc["harmonic_reference"] = {"enabled": True, "implementation": "fcpot"}
     fn = _write_yaml(tmp_path, {"calculations": [calc]})
     with pytest.raises(Exception, match="plugin_path"):
         read_inputfile(fn)
@@ -522,6 +656,7 @@ def test_fcpot_integration_command_stream(tmp_path, monkeypatch):
     calc["harmonic_reference"] = {
         "enabled": True,
         "cutoff": 4.2,
+        "implementation": "fcpot",
         "plugin_path": "/opt/fcpotplugin.so",
     }
     fn = _write_yaml(tmp_path, {"calculations": [calc]})
@@ -571,10 +706,7 @@ def test_fcpot_integration_command_stream(tmp_path, monkeypatch):
 def test_qtb_forces_quantum_reference(tmp_path):
     calc = _base_calc()
     calc["mode"] = "fe-qtb"
-    calc["harmonic_reference"] = {
-        "enabled": True,
-        "plugin_path": "/opt/fcpotplugin.so",
-    }
+    calc["harmonic_reference"] = {"enabled": True}
     fn = _write_yaml(tmp_path, {"calculations": [calc]})
     [opts] = read_inputfile(fn)
     assert opts._qtb is True
@@ -614,6 +746,74 @@ class _RecordingRunner:
         return lambda *a, **k: None
 
 
+def test_harmonic_integration_command_stream(tmp_path, monkeypatch):
+    from calphy.solid import Solid
+    import calphy.helpers as ph
+
+    calc = _base_calc()
+    calc["lattice"] = os.path.join(
+        os.path.dirname(__file__), "conf1.data"
+    )
+    calc["harmonic_reference"] = {"enabled": True, "cutoff": 4.2}
+    fn = _write_yaml(tmp_path, {"calculations": [calc]})
+    [opts] = read_inputfile(fn)
+
+    sim = tmp_path / "sim"
+    sim.mkdir()
+    job = Solid(calculation=opts, simfolder=str(sim))
+
+    pos, box = make_fcc(a=3.615)
+    model = HarmonicModel(
+        pos, box, np.ones(len(pos), dtype=int), [63.546], cutoff=4.2
+    )
+    model.set_spring_constants([1.0, 0.5])
+    model.set_tether(0.25)
+    job.harmonic_model = model
+    job.harmonic_einstein_k = model.einstein_anchor_constants(300.0)
+    job.lx = job.ly = job.lz = box[0]
+    job.vol = float(np.prod(box))
+
+    # thermal configuration file expected by the integration stage
+    _write_atomic_data(
+        str(sim / "conf.equilibration.data"), pos + 0.02, box
+    )
+
+    rec = _RecordingRunner(str(sim))
+    monkeypatch.setattr(ph, "create_object", lambda calc, directory: rec)
+    job.run_harmonic_integration(iteration=1)
+    script = "\n".join(rec.commands)
+
+    # topology data file written with ghosts and bonds
+    assert os.path.exists(str(sim / "conf.harmonic.data"))
+    # bond-based reference, both sub-styles, adapt scaling
+    assert "atom_style       bond" in script
+    assert "special_bonds    lj/coul 1.0 1.0 1.0" in script
+    assert "bond_style       hybrid harmonic class2" in script
+    assert "fix              fad all adapt 1 bond harmonic k 1*3 v_refscale" in script
+    assert "bond class2 k2 4*4 v_einscale scale yes reset yes" in script
+    assert "compute          cb all bond" in script
+    # real potential scaled via hybrid/scaled with a zero substyle for
+    # the ghost type coverage
+    assert "hybrid/scaled v_flambda eam/alloy 1.0 zero" in script
+    assert "Cu NULL" in script
+    assert "pair_coeff       * * zero" in script
+    # two-leg output files
+    assert "forward_leg1_1.dat" in script
+    assert "backward_leg1_1.dat" in script
+    assert "forward_leg2_1.dat" in script
+    assert "backward_leg2_1.dat" in script
+    # stage variables
+    assert "variable         flambda equal ramp(${li},${lf})" in script
+    assert "variable         mu equal ramp(${li},${lf})" in script
+    assert "variable         refscale equal v_mu" in script
+    assert "variable         einscale equal 1.0-v_mu" in script
+    # per-real-atom normalisation, exact unscaled recovery, COM thermostat
+    assert "group            real type 1" in script
+    assert "c_cb[1]/(v_refscale+1.0e-12)/v_nreal" in script
+    assert "c_cb[2]/(v_einscale+1.0e-12)/v_nreal" in script
+    assert "zero yes" in script
+
+
 def test_build_harmonic_model_from_dumps(tmp_path):
     """End-to-end fitting from LAMMPS-format dump files."""
     from calphy.solid import Solid
@@ -623,12 +823,7 @@ def test_build_harmonic_model_from_dumps(tmp_path):
     calc["mass"] = 26.98
     calc["element"] = "Al"
     calc["pair_coeff"] = "* * tests/Cu01.eam.alloy Cu"
-    calc["harmonic_reference"] = {
-        "enabled": True,
-        "cutoff": 4.2,
-        "n_snapshots": 6,
-        "plugin_path": "/opt/fcpotplugin.so",
-    }
+    calc["harmonic_reference"] = {"enabled": True, "cutoff": 4.2, "n_snapshots": 6}
     fn = _write_yaml(tmp_path, {"calculations": [calc]})
     [opts] = read_inputfile(fn)
 
@@ -668,35 +863,44 @@ def test_build_harmonic_model_from_dumps(tmp_path):
     assert np.allclose(job.harmonic_model.k_groups, [1.2, 0.4], atol=1e-8)
     assert os.path.exists(str(sim / "harmonic.model.npz"))
     assert os.path.exists(str(sim / "harmonic.frequencies.dat"))
-    # the force-constant reference artefacts for the fcpot switching stage
-    assert os.path.exists(str(sim / "harmonic.fc"))
-    assert os.path.exists(str(sim / "harmonic.fcblocks.npz"))
-    assert job.harmonic_fc_blocks is not None
+    assert job.harmonic_model.tether_k == pytest.approx(0.5 * 1.2)
+    assert np.all(job.harmonic_einstein_k > 0)
     assert (
         job.harmonic_fe_quantum["f_modes"] > job.harmonic_fe_classical["f_modes"]
     )
 
-    # thermodynamic assembly: fabricate single-leg switching output
-    # (columns: dU_real, dU_ref, lambda) against the force-constant
-    # reference, F_real = F_fc - w (+ pV)
+    # thermodynamic assembly: fabricate two-leg switching output
     job.lx = job.ly = job.lz = box[0]
     job.vol = float(np.prod(box))
     lam = np.linspace(1, 0, 100)
-    du = np.full_like(lam, 0.5)  # constant integrand
-    np.savetxt(
-        str(sim / "forward_1.dat"),
-        np.column_stack((du, np.zeros_like(du), lam)),
-    )
-    np.savetxt(
-        str(sim / "backward_1.dat"),
-        np.column_stack((du, np.zeros_like(du), lam[::-1])),
-    )
+    for prefix, val in [("leg1", 0.5), ("leg2", 0.2)]:
+        du = np.full_like(lam, val)  # constant integrand
+        np.savetxt(
+            str(sim / ("forward_%s_1.dat" % prefix)),
+            np.column_stack((du, np.zeros_like(du), lam)),
+        )
+        np.savetxt(
+            str(sim / ("backward_%s_1.dat" % prefix)),
+            np.column_stack((du, np.zeros_like(du), lam[::-1])),
+        )
     job.thermodynamic_integration()
-    # w = 0.5*(fw-bw) = -0.5 for the constant integrand
-    assert np.isclose(job.w, -0.5, atol=1e-8)
-    # the reference free energy is the exact force-constant free energy
-    assert job.fref == pytest.approx(job.harmonic_fe_classical["f_total"])
-    assert np.isclose(job.fe, job.fref + 0.5, atol=1e-8)
+    # per leg: w = 0.5*(fw-bw) = -val -> total w = -0.7
+    assert np.isclose(job.w, -0.7, atol=1e-8)
+    assert np.isclose(job.w_leg1, -0.5, atol=1e-8)
+    assert np.isclose(job.w_leg2, -0.2, atol=1e-8)
+
+    # the analytic anchor is the Einstein crystal at the matched
+    # constants (calphy curvature convention = 2 K_E)
+    from calphy.integrators import get_einstein_crystal_fe
+
+    fe_e, fcm_e = get_einstein_crystal_fe(
+        job.calc,
+        job.vol,
+        [2.0 * k for k in job.harmonic_einstein_k],
+        return_contributions=True,
+    )
+    assert job.fref == pytest.approx(fe_e + fcm_e)
+    assert np.isclose(job.fe, job.fref + 0.7, atol=1e-8)
 
 
 # ----------------------------------------------------------------------

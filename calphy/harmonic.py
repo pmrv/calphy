@@ -28,40 +28,58 @@ real potential. This reduces the dissipation during nonequilibrium
 Hamiltonian interpolation and shortens the switching times needed for a
 given accuracy.
 
-Its free energy is known exactly: the reference is a quadratic
-Hamiltonian, so diagonalising its (mass-weighted) Hessian yields the
-normal-mode frequencies and thereby the classical *or quantum* harmonic
-free energy.
+Two properties make it a valid Frenkel-Ladd reference:
 
-The reference used for switching is the exactly-quadratic force-constant
-Hamiltonian ``E = 1/2 u^T Phi u`` in the atomic displacements from the
-reference sites, evaluated in LAMMPS by the compiled ``fix fcpot`` plugin
-(plugins/fcpot). Being globally quadratic it cannot fold or exchange
-sites, so it needs no site tether and a single switching leg. The lambda
-switching to the real potential reuses the same ``pair_style
-hybrid/scaled`` machinery calphy already employs for the Uhlenbeck-Ford
-liquid reference.
+1. Its free energy is known exactly: the network is a quadratic
+   Hamiltonian, so diagonalising its (mass-weighted) Hessian yields the
+   normal-mode frequencies and thereby the classical *or quantum* harmonic
+   free energy.
 
-Free energy (per system), with k running over the 3N-3 finite modes:
+2. It runs natively in LAMMPS through ``pair_style list`` (MISC package),
+   which applies per-atom-ID-pair interactions of the form
+   ``E = K (r - r0)^2`` read from a file. The lambda switching to the real
+   potential then reuses the same ``pair_style hybrid/scaled`` machinery
+   calphy already employs for the Uhlenbeck-Ford liquid reference.
+
+The site tether
+---------------
+
+A pure pairwise network is translation invariant and, beyond harmonic
+order, its central-force springs have no transverse stiffness: collective
+"folding" motions can bring *non-bonded* atoms into overlap at very small
+spring-energy cost. In the pure-reference ensemble such configurations
+are visited freely, and they carry enormous real-potential energies —
+a genuine endpoint catastrophe for the switching integrand (observed
+directly in validation runs). The cure, standard for site-based harmonic
+references, is a weak Einstein tether to the reference sites,
+
+    U_ref = sum_pairs K (r - r0)^2  +  k_t * sum_i |x_i - X_i|^2,
+
+which restores confinement (no site exchange, bounded displacements)
+while the network still carries the phonon dispersion. In LAMMPS the
+tether is realised inside the *same* ``pair_style list`` file: one frozen
+ghost anchor atom is placed at each reference site X_i and connected to
+its real atom by a ``harmonic k_t 0.0`` entry, so the tether scales with
+the same (1-lambda) factor as the network.
+
+Free energy (per system). With the tether the reference has no zero
+modes; k runs over all 3N modes of the tethered network:
 
 classical:  F = kT * sum_k ln(hbar*omega_k / kT)  +  F_com
 quantum:    F = sum_k [ hbar*omega_k / 2 + kT ln(1 - exp(-hbar*omega_k/kT)) ] + F_com
 
-For the (untethered) force-constant reference the three translational
-zero modes are dropped and F_com is the free-particle COM term
--kT ln[V (2 pi M kT/h^2)^(3/2)].
-
-A weak site tether (``set_tether``) is still supported at the class level
-for analysis: it anchors each atom to its reference site,
-
-    U_ref = 1/2 u^T Phi u  +  k_t * sum_i |x_i - X_i|^2,
-
-removing the zero modes so k runs over all 3N modes, with the
-Frenkel-Smit COM correction
+The centre-of-mass correction F_com accounts for the COM-constrained
+dynamics exactly as for the Einstein crystal (the COM marginal of the
+tethered network is the same Gaussian as an Einstein crystal with
+per-atom constant k_t, since the network part is translation invariant):
 
     F_com = -kT ln[ V (beta / (2 pi sum_i mu_i^2 / k_t))^(3/2) ]
 
-(mu_i = m_i / M). It is not used by the fcpot switching path.
+with mu_i = m_i / M (Frenkel-Smit form, as in the Einstein path).
+
+For an *untethered* model (supported at the class level, e.g. for
+analysis) the three translational zero modes are dropped and F_com is the
+free-particle COM term -kT ln[V (2 pi M kT/h^2)^(3/2)].
 """
 
 import os
@@ -411,9 +429,10 @@ def frequencies_from_hessian(H, masses, tethered, zero_mode_tolerance=1e-6):
         if n_neg > 0 or n_zero > 0:
             raise ValueError(
                 "Tethered reference Hamiltonian has %d unstable and %d zero "
-                "modes; it must be strictly positive definite. Increase the "
-                "tether constant (set_tether) or the neighbour cutoff."
-                % (n_neg, n_zero)
+                "modes; it must be strictly positive definite. Increase "
+                "harmonic_reference.tether_fraction (or "
+                "tether_spring_constant), or increase "
+                "harmonic_reference.cutoff." % (n_neg, n_zero)
             )
         return np.sqrt(np.sort(evals) * OMEGA2_TO_SI)
 
@@ -759,8 +778,9 @@ class HarmonicModel:
                 raise ValueError(
                     "Tethered spring network has %d unstable and %d zero "
                     "modes; the reference must be strictly positive "
-                    "definite. Increase the tether constant (set_tether) "
-                    "or the neighbour cutoff." % (n_neg, n_zero)
+                    "definite. Increase harmonic_reference.tether_fraction "
+                    "(or tether_spring_constant), or increase "
+                    "harmonic_reference.cutoff." % (n_neg, n_zero)
                 )
             return np.sqrt(np.sort(evals) * OMEGA2_TO_SI)
 
@@ -877,6 +897,171 @@ class HarmonicModel:
             for i in range(self.natoms):
                 diag[i] += 2.0 * self.tether_k * np.eye(3)
         return [(i, i, diag[i]) for i in range(self.natoms)] + blocks
+
+    @property
+    def ghost_id_offset(self):
+        """
+        Ghost anchor atoms are written in reference-position order after
+        the real atoms, so the anchor of atom index p has LAMMPS id
+        ``ghost_id_offset + p + 1``.
+        """
+        return int(np.max(self.ids))
+
+    def mean_square_displacements(self, temperature):
+        """
+        Classical thermal mean-square displacement <|u_i|^2> (A^2) of
+        every atom in the tethered network, from the model Hessian:
+        cov(u) = kT H^-1 (with E = 1/2 u^T H u; our hessian() already is
+        the curvature matrix).
+        """
+        if self.tether_k is None:
+            raise RuntimeError("MSDs require a tethered (positive definite) model")
+        H = self.hessian()
+        Hinv = np.linalg.inv(H)
+        kbT = kb * temperature  # eV
+        msd = kbT * np.array(
+            [np.trace(Hinv[3 * i : 3 * i + 3, 3 * i : 3 * i + 3]) for i in range(self.natoms)]
+        )
+        return msd
+
+    def einstein_anchor_constants(self, temperature):
+        """
+        Per-element-type Einstein anchor constants K_E (LAMMPS
+        convention, E = K r^2) matched to the model's thermal MSD:
+        K_E = 3 kT / (2 <u^2>). Matching amplitudes minimises the
+        dissipation of the network -> Einstein switching leg.
+
+        Returns
+        -------
+        K_E : (n_types,) array in eV/A^2
+        """
+        msd = self.mean_square_displacements(temperature)
+        n_types = len(self.masses_per_type)
+        K_E = np.zeros(n_types)
+        for t in range(1, n_types + 1):
+            mask = self.types == t
+            if np.any(mask):
+                K_E[t - 1] = 3 * kb * temperature / (2 * np.mean(msd[mask]))
+            else:
+                K_E[t - 1] = 1.0
+        return K_E
+
+    def write_bond_data(self, filename, thermal_positions):
+        """
+        Write a LAMMPS data file (atom_style bond) containing the real
+        atoms at ``thermal_positions`` plus one frozen ghost anchor per
+        atom at its reference site, and the bond topology of the
+        reference Hamiltonian:
+
+        - bond types 1..G:      network springs (bond_style harmonic)
+        - bond type  G+1:       site tether, r0 = 0 (bond_style harmonic)
+        - bond types G+2..G+1+E: Einstein anchor bonds per element type
+          (bond_style class2 with K3 = K4 = 0, i.e. exactly K r^2),
+          duplicated on the same atom-ghost pairs as the tether
+
+        Bond coefficients are NOT written to the file; they are set via
+        bond_coeff commands so that fix adapt can scale them.
+        """
+        if self.tether_k is None:
+            raise RuntimeError("set_tether() must be called before writing")
+        n_el = len(self.masses_per_type)
+        ghost_type = n_el + 1
+        offset = self.ghost_id_offset
+        n_groups = self.n_groups
+        n_bond_types = n_groups + 1 + n_el
+
+        # ghost positions: wrapped and precision-snapped inside the box
+        gp = np.round(np.mod(self.reference_positions, self.box), 10)
+        gp = np.where(gp >= self.box, 0.0, gp)
+        tp = np.round(np.mod(np.asarray(thermal_positions, dtype=float), self.box), 10)
+        tp = np.where(tp >= self.box, 0.0, tp)
+
+        n_bonds = len(self.pairs) + 2 * self.natoms
+        with open(filename, "w") as f:
+            f.write("calphy harmonic (phonon) reference topology\n\n")
+            f.write("%d atoms\n" % (2 * self.natoms))
+            f.write("%d atom types\n" % ghost_type)
+            f.write("%d bonds\n" % n_bonds)
+            f.write("%d bond types\n\n" % n_bond_types)
+            for ax, name in enumerate(["x", "y", "z"]):
+                f.write("0.0 %.10f %slo %shi\n" % (self.box[ax], name, name))
+            f.write("\nMasses\n\n")
+            for t in range(n_el):
+                f.write("%d %f\n" % (t + 1, self.masses_per_type[t]))
+            f.write("%d 1.0\n" % ghost_type)
+            f.write("\nAtoms # bond\n\n")
+            for p in range(self.natoms):
+                f.write(
+                    "%d 0 %d %.10f %.10f %.10f\n"
+                    % (self.ids[p], self.types[p], tp[p, 0], tp[p, 1], tp[p, 2])
+                )
+            for p in range(self.natoms):
+                f.write(
+                    "%d 0 %d %.10f %.10f %.10f\n"
+                    % (offset + p + 1, ghost_type, gp[p, 0], gp[p, 1], gp[p, 2])
+                )
+            f.write("\nBonds\n\n")
+            nb = 0
+            for p in range(len(self.pairs)):
+                nb += 1
+                f.write(
+                    "%d %d %d %d\n"
+                    % (
+                        nb,
+                        self.group_index[p] + 1,
+                        self.ids[self.pairs[p, 0]],
+                        self.ids[self.pairs[p, 1]],
+                    )
+                )
+            for p in range(self.natoms):
+                nb += 1
+                f.write(
+                    "%d %d %d %d\n" % (nb, n_groups + 1, self.ids[p], offset + p + 1)
+                )
+            for p in range(self.natoms):
+                nb += 1
+                f.write(
+                    "%d %d %d %d\n"
+                    % (nb, n_groups + 1 + self.types[p], self.ids[p], offset + p + 1)
+                )
+
+    def bond_coeff_commands(self, k_einstein):
+        """
+        bond_coeff commands matching :meth:`write_bond_data`, for
+        ``bond_style hybrid harmonic class2``.
+        """
+        commands = []
+        for g in range(self.n_groups):
+            commands.append(
+                "bond_coeff       %d harmonic %.10f %.10f"
+                % (g + 1, self.k_groups[g], self.groups[g]["distance"])
+            )
+        commands.append(
+            "bond_coeff       %d harmonic %.10f 0.0"
+            % (self.n_groups + 1, self.tether_k)
+        )
+        for t in range(len(self.masses_per_type)):
+            commands.append(
+                "bond_coeff       %d class2 0.0 %.10f 0.0 0.0"
+                % (self.n_groups + 2 + t, k_einstein[t])
+            )
+        return commands
+
+    def reference_energies(self, positions, k_einstein):
+        """
+        Unscaled reference energies for a configuration of the real
+        atoms: (E_harmonic_substyle, E_class2_substyle) in eV, where the
+        harmonic sub-style holds network + tether and class2 holds the
+        Einstein anchor bonds. Used for start-up consistency checks
+        against the LAMMPS-evaluated bond energies.
+        """
+        disp = minimum_image(
+            np.asarray(positions, dtype=float) - self.reference_positions, self.box
+        )
+        u2 = np.sum(disp**2, axis=1)
+        e_harm = self.energy(positions) + self.tether_k * np.sum(u2)
+        e_class2 = float(np.sum(np.asarray(k_einstein)[self.types - 1] * u2))
+        return float(e_harm), e_class2
 
     # ------------------------------------------------------------------
     # serialisation
