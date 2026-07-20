@@ -286,9 +286,15 @@ points at where it belongs.
 ```
 ```{grid-item} [](hr_distance_tolerance)
 ```
+```{grid-item} [](hr_tether_fraction)
+```
+```{grid-item} [](hr_tether_spring_constant)
+```
 ```{grid-item} [](hr_quantum)
 ```
 ```{grid-item} [](hr_fitting_backend)
+```
+```{grid-item} [](hr_implementation)
 ```
 ```{grid-item} [](hr_plugin_path)
 ```
@@ -1883,7 +1889,7 @@ Strength parameter `p` of the single-component UFM endpoint in the two-leg path.
 (harmonic_reference_block)=
 ## `harmonic_reference` block
 
-Replaces the Einstein-crystal reference of the **solid** Frenkel–Ladd path with a fitted **harmonic phonon crystal** — the true harmonic Hamiltonian `E = ½ uᵀΦu` in the atomic displacements from the reference sites, with force constants fitted to displacement–force data of the real potential. Unlike independent Einstein oscillators, this is a *coupled* harmonic crystal with a genuine phonon dispersion, so it lies much closer to the real potential. This reduces the dissipation of the nonequilibrium switching and typically permits shorter switching times for the same accuracy.
+Replaces the Einstein-crystal reference of the **solid** Frenkel–Ladd path with a fitted **harmonic phonon crystal** — a Born–von Kármán spring network of pairwise harmonic bonds between neighbour shells. Unlike independent Einstein oscillators, the spring network is a *coupled* harmonic crystal with a genuine phonon dispersion, so it lies much closer to the real potential. This reduces the dissipation of the nonequilibrium switching and typically permits shorter switching times for the same accuracy.
 
 ```
 harmonic_reference:
@@ -1891,27 +1897,28 @@ harmonic_reference:
   cutoff: 5.0
   n_snapshots: 25
   displacement: 0.05
-  plugin_path: /path/to/calphy/plugins/fcpot/fcpotplugin.so
 ```
 
-**How it works.** During the averaging stage the converged structure is energy-minimised at the average box to obtain the reference sites. A set of random-displacement snapshots is generated and the real-potential forces on them are recorded; shell-resolved spring constants are then fitted by linear least squares (the same displacement–force fitting strategy used by force-constant packages such as [hiphive](https://hiphive.materialsmodeling.org/), which is also available as an optional backend). The fitted force constants define the harmonic Hamiltonian `E = ½ uᵀΦu`, whose free energy is evaluated exactly by diagonalising the (mass-weighted) Hessian — classical or quantum, including the Frenkel–Smit centre-of-mass correction.
+**How it works.** During the averaging stage the converged structure is energy-minimised at the average box to obtain the reference sites. A set of random-displacement snapshots is generated and the real-potential forces on them are recorded; shell-resolved spring constants are then fitted by linear least squares (the same displacement–force fitting strategy used by force-constant packages such as [hiphive](https://hiphive.materialsmodeling.org/), which is also available as an optional backend). The reference additionally includes a weak Einstein **site tether** anchoring each atom to its reference site (see [`tether_fraction`](hr_tether_fraction)): a pure pairwise network is translation invariant and would allow collective folding and site exchange in the reference ensemble, making the switching integrand diverge; the tether restores confinement while the network carries the phonon dispersion.
 
-The reference is the *true* harmonic Hamiltonian `E = ½ uᵀΦu` (quadratic in the atomic displacements from the reference sites), evaluated by the small compiled LAMMPS plugin shipped in `plugins/fcpot` (build with `plugins/fcpot/build.sh`; requires a LAMMPS with the PLUGIN package, e.g. the pip wheel). Because this Hamiltonian is exactly quadratic, it is exactly solvable from the force-constant eigenvalues, cannot fold or exchange sites (so no tether is needed), and the switching is a **single leg**:
+The switching runs entirely inside LAMMPS as a **two-leg path**, analogous to the two-leg Uhlenbeck–Ford liquid path:
 
-- The real potential is scaled with `pair_style hybrid/scaled`; the `fix fcpot` applies forces scaled by (1−λ) while reporting the unscaled reference energy as its vector element, which is exactly the dU_ref column of the switching integrand.
-- With `fitting_backend: hiphive` the plugin consumes the **full hiphive FC2 blocks** (including transverse components); otherwise the fitted spring network's blocks are used.
+1. **Leg 1**: real potential ↔ tethered spring network. The reference is realised as LAMMPS *bonds* (`bond_style hybrid harmonic class2`; bond topology handles periodic images correctly): one harmonic bond type per neighbour shell plus a tether type with `r0 = 0` connecting each atom to a frozen ghost anchor at its reference site. The real potential is scaled with `pair_style hybrid/scaled` and the bond coefficients with `fix adapt`; since bond energies are linear in their coefficients, the unscaled reference energies are recovered exactly from the per-substyle `compute bond` values.
+2. **Leg 2**: tethered network ↔ **Einstein crystal** (per-element anchor bonds as `bond_style class2` with only the quadratic term, amplitude-matched to the network's thermal displacements). The Einstein crystal is exactly quadratic in the coordinates, so its free energy is evaluated with calphy's standard analytic Einstein-crystal formula (classical or quantum, including the Frenkel–Smit centre-of-mass correction).
 
-The construction makes the result **exact regardless of the quality of the fit**: the reference free energy is computed exactly from the force-constant eigenvalues, so the fit only controls the switching dissipation, never the correctness.
+The two-leg construction makes the result **exact regardless of the anharmonicity of the distance-based spring network** (a `K (r − r0)²` bond is quadratic in the *distance*, not in the displacements): the network free energy cancels between the legs, and the network serves purely as a low-dissipation bridge between the real crystal and the analytic Einstein anchor. The quality of the spring fit therefore affects only the dissipation, never the correctness.
 
-A start-up consistency check compares the `fix fcpot` reference energy against the python force-constant model at the initial configuration and aborts on any mismatch.
+A start-up consistency check compares the LAMMPS-evaluated reference bond energies against the python model at the initial configuration and aborts on any mismatch.
+
+**The `fcpot` implementation.** With [`implementation: fcpot`](hr_implementation) the reference is instead the *true* harmonic Hamiltonian `E = ½ uᵀΦu` (quadratic in the atomic displacements from the reference sites), evaluated by the small compiled LAMMPS plugin shipped in `plugins/fcpot` (build with `plugins/fcpot/build.sh`; requires a LAMMPS with the PLUGIN package, e.g. the pip wheel). Because this Hamiltonian is exactly quadratic, it is exactly solvable from the force-constant eigenvalues, cannot fold or exchange sites (so no tether is needed), and the switching is a **single leg** — roughly half the cost of the two-leg bond path and with substantially lower dissipation. With `fitting_backend: hiphive` the plugin consumes the **full hiphive FC2 blocks** (including transverse components); otherwise the fitted spring network's blocks are used. The fix applies forces scaled by (1−λ) while reporting the unscaled reference energy as its scalar, which is exactly the dU_ref column of the switching integrand; a start-up consistency check against the python model applies here too. The stock-LAMMPS `bonds` implementation remains the default since it needs no compiled plugin.
 
 **Requirements and restrictions.**
-- LAMMPS must be built with the **PLUGIN** package and a version recent enough to provide `pair_style hybrid/scaled`, and the `fcpot` plugin must be compiled (see [`plugin_path`](hr_plugin_path)).
+- LAMMPS must be built with the **MOLECULE** and **CLASS2** packages (harmonic and class2 bond styles) and a version recent enough to provide `pair_style hybrid/scaled` and `fix adapt` bond scaling (≥ 2021).
 - Only orthogonal simulation boxes are supported.
 - Solid reference phase only; not available in `script_mode` or for `alchemy`/`composition_scaling` modes.
 - The box must be larger than twice the spring [`cutoff`](hr_cutoff) in every direction.
 
-**Output.** The fitted model, its phonon spectrum and the switching work are reported in `report.yaml` under `harmonic_reference`, alongside the artefacts `harmonic.model.npz`, `harmonic.frequencies.dat`, `harmonic.fc` and `harmonic.fcblocks.npz` in the simulation folder.
+**Output.** The fitted model, its phonon spectrum, the per-leg works and the anchor constants are reported in `report.yaml` under `harmonic_reference`, alongside the artefacts `harmonic.model.npz`, `harmonic.frequencies.dat` and `conf.harmonic.data` in the simulation folder.
 
 ---
 
@@ -1986,6 +1993,34 @@ Distance tolerance in Å used to group pairs into neighbour shells (bond types).
 
 ---
 
+(hr_tether_fraction)=
+#### `tether_fraction`
+
+_type_: float \
+_default_: 0.5 \
+_example_:
+```
+tether_fraction: 1.0
+```
+
+The site-tether constant is set to `k_t = tether_fraction × max(fitted spring constant)`. The tether is an integral part of the reference Hamiltonian (`U_ref = Σ K (r − r0)² + k_t Σ |xᵢ − Xᵢ|²`) and is accounted for exactly in its free energy. It prevents the collective folding and site-exchange motions that a translation-invariant spring network would otherwise perform in the pure-reference ensemble — configurations which cost the network almost nothing but carry enormous real-potential energies and make the switching integrand diverge. Larger values make the reference more Einstein-like (more confinement, somewhat more dissipation); smaller values rely more on the network. If the fitted network contains negative outer-shell constants and the stability check fails, increase this.
+
+---
+
+(hr_tether_spring_constant)=
+#### `tether_spring_constant`
+
+_type_: float \
+_default_: None (derived from [`tether_fraction`](hr_tether_fraction)) \
+_example_:
+```
+tether_spring_constant: 0.3
+```
+
+Absolute site-tether constant k_t in eV/Å², overriding [`tether_fraction`](hr_tether_fraction).
+
+---
+
 (hr_quantum)=
 #### `quantum`
 
@@ -2017,10 +2052,24 @@ fitting_backend: tdep
 ```
 
 - `leastsq` fits the shell spring constants directly by linear least squares — no extra dependencies. Central-force, shell-isotropic; cheap but coarse.
-- `hiphive` fits the **full second-order force constants** (all tensor components) with the optional [hiphive](https://hiphive.materialsmodeling.org/) package (and its `trainstation` optimiser), from random-displacement snapshots around the relaxed sites; hiphive uses the crystal's space group, so a perfect supercell reduces to a handful of independent parameters regardless of size. The full FC2 blocks are used directly as the reference.
+- `hiphive` fits the **full second-order force constants** (all tensor components) with the optional [hiphive](https://hiphive.materialsmodeling.org/) package (and its `trainstation` optimiser), from random-displacement snapshots around the relaxed sites; hiphive uses the crystal's space group, so a perfect supercell reduces to a handful of independent parameters regardless of size.
 - `tdep` fits the same **symmetry-aware full FC2 with hiphive**, but from the **equilibrated MD trajectory** rather than imposed displacements — the temperature-dependent effective potential (TDEP, Hellman *et al.*). The reference sites are the relaxed **symmetric** lattice (the thermal mean for a perfect crystal, so the fit stays symmetry-reduced) and only the fit **forces** come from MD, so the force constants are the anharmonically *renormalised* effective ones at the target state point — which typically gives the lowest switching dissipation. Samples `n_snapshots` frames spaced [`sampling_interval`](hr_n_snapshots) steps apart from the already-equilibrated cell; the sampled mean's drift from the symmetric sites is reported as an anharmonicity/symmetry diagnostic. Requires `hiphive`.
 
-The choice affects only the quality of the reference (and thereby dissipation), never the correctness of the result.
+With [`implementation: fcpot`](hr_implementation) the full FC2 blocks are used directly as the reference; with `bonds` each pair block is projected onto the bond direction to give a regularised spring estimate. The choice affects only the quality of the reference (and thereby dissipation), never the correctness of the result.
+
+---
+
+(hr_implementation)=
+#### `implementation`
+
+_type_: string, one of `bonds`, `fcpot` \
+_default_: bonds \
+_example_:
+```
+implementation: fcpot
+```
+
+How the reference Hamiltonian is realised in LAMMPS. `bonds` uses stock LAMMPS bond styles (tethered spring network + two-leg path to the analytic Einstein anchor; works with any LAMMPS that has the MOLECULE and CLASS2 packages). `fcpot` uses the compiled plugin in `plugins/fcpot` to evaluate the true harmonic Hamiltonian `½ uᵀΦu` — exactly solvable, no tether, single switching leg, lower dissipation and cost — and requires [`plugin_path`](hr_plugin_path) plus a LAMMPS built with the PLUGIN package.
 
 ---
 
@@ -2034,7 +2083,7 @@ _example_:
 plugin_path: /path/to/calphy/plugins/fcpot/fcpotplugin.so
 ```
 
-Path to the compiled `fcpotplugin.so`, **required** whenever the harmonic reference is enabled. Build it against your LAMMPS with `plugins/fcpot/build.sh` (by default it compiles against the headers shipped with the `lammps` pip wheel); the LAMMPS you run with must have the PLUGIN package.
+Path to the compiled `fcpotplugin.so`, required for `implementation: fcpot`. Build it against your LAMMPS with `plugins/fcpot/build.sh` (by default it compiles against the headers shipped with the `lammps` pip wheel).
 
 ---
 ---
