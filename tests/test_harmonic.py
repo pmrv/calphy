@@ -19,6 +19,7 @@ from calphy.harmonic import (
     group_pairs,
     minimum_image,
     read_lammps_dump,
+    tdep_reference,
 )
 from calphy.input import read_inputfile
 
@@ -696,3 +697,118 @@ def test_build_harmonic_model_from_dumps(tmp_path):
     # the reference free energy is the exact force-constant free energy
     assert job.fref == pytest.approx(job.harmonic_fe_classical["f_total"])
     assert np.isclose(job.fe, job.fref + 0.5, atol=1e-8)
+
+
+# ----------------------------------------------------------------------
+# TDEP effective force constants (from equilibrium MD)
+# ----------------------------------------------------------------------
+
+
+def test_tdep_reference_mean_and_base_force():
+    """Mean positions average out thermal noise and a rigid offset; the
+    mean residual force is the frame-averaged force."""
+    pos, box = make_fcc(a=3.615)
+    rng = np.random.default_rng(3)
+    offset = np.array([0.13, -0.07, 0.05])  # e.g. thermal drift of the sites
+    frames, fframes = [], []
+    for _ in range(200):
+        p = pos + offset + rng.normal(0, 0.05, size=pos.shape)
+        frames.append(np.mod(p, box))  # wrap into the box (PBC)
+        fframes.append(rng.normal(0, 0.01, size=pos.shape))
+    mean_pos, mean_force = tdep_reference(frames, fframes, box)
+    # mean recovered up to a whole-box image
+    d = minimum_image(mean_pos - (pos + offset), box)
+    assert np.abs(d).max() < 0.02
+    assert np.allclose(mean_force, np.mean(fframes, axis=0))
+
+
+def test_tdep_reference_requires_frames():
+    with pytest.raises(ValueError, match="at least one frame"):
+        tdep_reference([], [], np.array([1.0, 1.0, 1.0]))
+
+
+def test_tdep_recovers_force_constants_from_thermal_forces():
+    """The TDEP path recovers the force constants from thermal-force data
+    when fitted, symmetry-aware, on the relaxed (symmetric) sites -- which
+    for a perfect crystal are the thermal mean -- with the mean MD force
+    removed as the base force. Building the fit on the symmetric reference
+    keeps hiphive symmetry-reduced (a few DOF); the noisy sample mean would
+    instead collapse it to a full unsymmetrised P1 fit."""
+    hiphive = pytest.importorskip("hiphive")
+    from calphy.harmonic import fit_with_hiphive
+
+    sites, box = make_fcc(a=3.615)  # perfect fcc: symmetric sites
+    types = np.ones(len(sites), dtype=int)
+    truth = HarmonicModel(sites, box, types, [63.546], cutoff=4.2)
+    truth.set_spring_constants([1.3, 0.45])
+
+    # thermal frames about the symmetric sites (the thermal mean sits on
+    # the symmetric sites by symmetry); symmetry reduces the fit to a few
+    # DOF, so a modest number of frames over-determines it
+    rng = np.random.default_rng(11)
+    frames, forces = [], []
+    for _ in range(20):
+        p = sites + rng.normal(0, 0.04, size=sites.shape)
+        frames.append(np.mod(p, box))
+        forces.append(truth.forces(p))
+
+    mean_pos, _ = tdep_reference(frames, forces, box)
+    # the thermal mean stays on the symmetric sites (drift is sampling noise)
+    assert np.abs(minimum_image(mean_pos - sites, box)).max() < 0.05
+
+    # fit on the SYMMETRIC reference (not the noisy mean); the forces are
+    # referenced to those same symmetric sites, so no base force is needed
+    fit = HarmonicModel(sites, box, types, [63.546], cutoff=4.2)
+    fit_with_hiphive(fit, frames, forces)
+    assert np.allclose(fit.k_groups, [1.3, 0.45], atol=0.02)
+    assert hasattr(fit, "full_fc_blocks") and len(fit.full_fc_blocks) > 0
+
+
+def test_tdep_input_schema(tmp_path):
+    calc = _base_calc()
+    calc["harmonic_reference"] = {
+        "enabled": True,
+        "fitting_backend": "tdep",
+        "sampling_interval": 50,
+        "n_snapshots": 30,
+        "plugin_path": "/opt/fcpotplugin.so",
+    }
+    fn = _write_yaml(tmp_path, {"calculations": [calc]})
+    [opts] = read_inputfile(fn)
+    hr = opts.harmonic_reference
+    assert hr.fitting_backend == "tdep"
+    assert hr.sampling_interval == 50
+
+
+def test_tdep_sampling_command_stream(tmp_path):
+    """The TDEP sampling stage continues the equilibrium MD and dumps
+    positions+forces every sampling_interval steps -- no minimisation and
+    no imposed displacement."""
+    from calphy.solid import Solid
+
+    calc = _base_calc()
+    calc["lattice"] = os.path.join(os.path.dirname(__file__), "conf1.data")
+    calc["harmonic_reference"] = {
+        "enabled": True,
+        "fitting_backend": "tdep",
+        "n_snapshots": 5,
+        "sampling_interval": 40,
+        "plugin_path": "/opt/fcpotplugin.so",
+    }
+    fn = _write_yaml(tmp_path, {"calculations": [calc]})
+    [opts] = read_inputfile(fn)
+
+    sim = tmp_path / "sim"
+    sim.mkdir()
+    job = Solid(calculation=opts, simfolder=str(sim))
+    rec = _RecordingRunner(str(sim))
+    job._sample_tdep_snapshots(rec)
+    script = "\n".join(rec.commands)
+
+    assert "fix              3 all nvt temp" in script
+    assert "run               40" in script
+    assert "harmonic.snapshot_0.dump" in script
+    assert "harmonic.snapshot_4.dump" in script
+    # TDEP does not minimise or impose displacements
+    assert "minimize" not in script
+    assert "displace_atoms" not in script

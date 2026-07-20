@@ -232,6 +232,52 @@ def minimum_image(vectors, box):
     return vectors - box * np.round(vectors / box)
 
 
+def tdep_reference(positions, forces, box):
+    """
+    Mean atomic positions and mean force from a set of MD frames, for the
+    temperature-dependent effective potential (TDEP) reference.
+
+    The reference sites of the effective harmonic model are the thermal
+    *mean* positions (not the 0 K minimum), so that the fitted force
+    constants are the anharmonically renormalised effective ones at the
+    sampled state point. Frames are aligned to the first frame with the
+    minimum-image convention before averaging, so atoms that wrap across a
+    periodic boundary between frames average correctly (valid as long as
+    per-frame displacements stay below half the box, i.e. a solid with no
+    diffusion).
+
+    Parameters
+    ----------
+    positions : sequence of (N, 3) arrays
+        atomic positions of each frame (sorted by id, consistent order)
+    forces : sequence of (N, 3) arrays
+        atomic forces of each frame, same order
+    box : (3,) array
+        orthogonal box lengths
+
+    Returns
+    -------
+    mean_positions : (N, 3) array
+        thermal mean positions, in the image of the first frame
+    mean_force : (N, 3) array
+        mean residual force (subtracted as the base force in the fit; it
+        vanishes by symmetry for a perfect crystal but is removed
+        explicitly so any residual does not bias the force constants)
+    """
+    positions = [np.asarray(p, dtype=float) for p in positions]
+    forces = [np.asarray(f, dtype=float) for f in forces]
+    if len(positions) == 0:
+        raise ValueError("tdep_reference needs at least one frame")
+    box = np.asarray(box, dtype=float)
+    anchor = positions[0]
+    disp_sum = np.zeros_like(anchor)
+    for p in positions:
+        disp_sum += minimum_image(p - anchor, box)
+    mean_positions = anchor + disp_sum / len(positions)
+    mean_force = np.mean(forces, axis=0)
+    return mean_positions, mean_force
+
+
 def find_neighbor_pairs(positions, box, cutoff):
     """
     Find all unique atom pairs within ``cutoff`` under periodic boundary

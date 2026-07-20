@@ -2009,14 +2009,18 @@ Both the classical and quantum harmonic free energies of the fitted network are 
 (hr_fitting_backend)=
 #### `fitting_backend`
 
-_type_: string, one of `leastsq`, `hiphive` \
+_type_: string, one of `leastsq`, `hiphive`, `tdep` \
 _default_: leastsq \
 _example_:
 ```
-fitting_backend: hiphive
+fitting_backend: tdep
 ```
 
-`leastsq` fits the shell spring constants directly by linear least squares — no extra dependencies. `hiphive` fits the full second-order force constants with the optional [hiphive](https://hiphive.materialsmodeling.org/) package (and its `trainstation` optimiser); the full FC2 blocks are then used directly as the reference. The choice affects only the quality of the reference (and thereby dissipation), never the correctness of the result.
+- `leastsq` fits the shell spring constants directly by linear least squares — no extra dependencies. Central-force, shell-isotropic; cheap but coarse.
+- `hiphive` fits the **full second-order force constants** (all tensor components) with the optional [hiphive](https://hiphive.materialsmodeling.org/) package (and its `trainstation` optimiser), from random-displacement snapshots around the relaxed sites; hiphive uses the crystal's space group, so a perfect supercell reduces to a handful of independent parameters regardless of size. The full FC2 blocks are used directly as the reference.
+- `tdep` fits the same **symmetry-aware full FC2 with hiphive**, but from the **equilibrated MD trajectory** rather than imposed displacements — the temperature-dependent effective potential (TDEP, Hellman *et al.*). The reference sites are the relaxed **symmetric** lattice (the thermal mean for a perfect crystal, so the fit stays symmetry-reduced) and only the fit **forces** come from MD, so the force constants are the anharmonically *renormalised* effective ones at the target state point — which typically gives the lowest switching dissipation. Samples `n_snapshots` frames spaced [`sampling_interval`](hr_n_snapshots) steps apart from the already-equilibrated cell; the sampled mean's drift from the symmetric sites is reported as an anharmonicity/symmetry diagnostic. Requires `hiphive`.
+
+The choice affects only the quality of the reference (and thereby dissipation), never the correctness of the result.
 
 ---
 

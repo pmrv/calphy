@@ -358,12 +358,20 @@ class HarmonicReference(
                     "include at least the first two or three neighbour "
                     "shells; must be smaller than half the box length.")]
     n_snapshots: Annotated[int, Field(default=25, ge=5,
-        description="Number of random-displacement snapshots used to fit "
-                    "the spring constants.")]
+        description="Number of snapshots used to fit the force constants. "
+                    "For 'leastsq'/'hiphive' these are random-displacement "
+                    "snapshots around the relaxed sites; for 'tdep' they "
+                    "are frames sampled from the equilibrated MD "
+                    "trajectory.")]
     displacement: Annotated[float, Field(default=0.05, gt=0,
         description="Amplitude (A) of the uniform random displacements "
                     "applied per Cartesian component when generating "
-                    "fitting snapshots.")]
+                    "fitting snapshots. Ignored by the 'tdep' backend, "
+                    "which samples thermal displacements from MD.")]
+    sampling_interval: Annotated[int, Field(default=100, ge=1,
+        description="MD steps between successive snapshots for the 'tdep' "
+                    "backend (spacing to decorrelate the thermal frames). "
+                    "Unused by the displacement-based backends.")]
     distance_tolerance: Annotated[float, Field(default=0.05, gt=0,
         description="Distance tolerance (A) for grouping pairs into "
                     "neighbour shells (bond types).")]
@@ -375,13 +383,23 @@ class HarmonicReference(
                     "classical thermostat this yields a one-shot "
                     "quantum-corrected free energy: classical anharmonic "
                     "sampling on top of a quantum harmonic baseline.")]
-    fitting_backend: Annotated[Literal["leastsq", "hiphive"], Field(
+    fitting_backend: Annotated[Literal["leastsq", "hiphive", "tdep"], Field(
         default="leastsq",
         description="'leastsq' fits shell spring constants directly by "
                     "linear least squares (no extra dependencies). "
                     "'hiphive' fits full second-order force constants "
-                    "with the optional hiphive package; the full FC2 "
-                    "blocks are then used directly as the reference.")]
+                    "with the optional hiphive package from random-"
+                    "displacement snapshots around the relaxed sites; the "
+                    "full FC2 blocks are used directly as the reference. "
+                    "'tdep' fits the same symmetry-aware full FC2 with "
+                    "hiphive but from the equilibrated MD trajectory "
+                    "(temperature-dependent effective potential): the "
+                    "reference sites are the relaxed (symmetric) lattice -- "
+                    "the thermal mean for a perfect crystal -- and only the "
+                    "fit forces come from MD, so the force constants are "
+                    "the anharmonically renormalised effective ones at the "
+                    "target state point, which minimises switching "
+                    "dissipation.")]
     plugin_path: Annotated[Union[str, None], Field(
         default=None,
         description="Path to the compiled fcpotplugin.so, required "

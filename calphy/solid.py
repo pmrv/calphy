@@ -293,7 +293,13 @@ class Solid(cph.Phase):
             "id type x y z vx vy vz modify sort id"
         )
 
-        # relax atomic positions at fixed box: these are the reference sites
+        # relax atomic positions at fixed box: these are the SYMMETRIC
+        # reference sites. Using the relaxed lattice (rather than the noisy
+        # sample mean) as the reference is what lets the symmetry-aware fit
+        # exploit the space group of a perfect crystal -- a mean over a
+        # finite trajectory breaks the symmetry and collapses hiphive to a
+        # full unsymmetrised (P1) fit. For a perfect crystal the relaxed
+        # lattice in the thermally-expanded box IS the thermal mean.
         lmp.command("min_style         cg")
         lmp.command("minimize          0.0 1.0e-8 10000 100000")
         lmp.command("reset_timestep    0")
@@ -302,30 +308,91 @@ class Solid(cph.Phase):
             "id type x y z fx fy fz modify sort id"
         )
 
-        # random-displacement snapshots with real-potential forces
-        for s in range(hr.n_snapshots):
-            lmp.command(
-                "read_dump         harmonic.reference.dump 0 x y z box no replace yes"
-            )
-            lmp.command(
-                "displace_atoms    all random %f %f %f %d units box"
-                % (
-                    hr.displacement,
-                    hr.displacement,
-                    hr.displacement,
-                    np.random.randint(1, 10**6),
-                )
-            )
-            lmp.command("run               0")
-            lmp.command(
-                "write_dump        all custom harmonic.snapshot_%d.dump "
-                "id type x y z fx fy fz modify sort id" % s
-            )
-
-        # restore the thermal state and decorrelate briefly
+        # restore the thermal state (positions + velocities)
         lmp.command(
             "read_dump         traj.harmonic_thermal.dump 0 x y z vx vy vz "
             "box no replace yes"
+        )
+
+        if hr.fitting_backend == "tdep":
+            # temperature-dependent effective potential: sample the
+            # equilibrium MD trajectory for the fit forces (the reference
+            # sites stay the symmetric relaxed lattice written above)
+            self._sample_tdep_snapshots(lmp)
+        else:
+            # random-displacement snapshots with real-potential forces
+            for s in range(hr.n_snapshots):
+                lmp.command(
+                    "read_dump         harmonic.reference.dump 0 x y z "
+                    "box no replace yes"
+                )
+                lmp.command(
+                    "displace_atoms    all random %f %f %f %d units box"
+                    % (
+                        hr.displacement,
+                        hr.displacement,
+                        hr.displacement,
+                        np.random.randint(1, 10**6),
+                    )
+                )
+                lmp.command("run               0")
+                lmp.command(
+                    "write_dump        all custom harmonic.snapshot_%d.dump "
+                    "id type x y z fx fy fz modify sort id" % s
+                )
+            # restore the thermal state and decorrelate briefly
+            lmp.command(
+                "read_dump         traj.harmonic_thermal.dump 0 x y z vx vy vz "
+                "box no replace yes"
+            )
+            if self.calc._qtb:
+                qtb = self.calc.quantum_thermal_bath
+                lmp.command("fix              3 all nve")
+                lmp.command(
+                    "fix              3q all qtb temp %f damp %f seed %d f_max %f N_f %d"
+                    % (
+                        self.calc._temperature,
+                        qtb.thermostat_damping,
+                        np.random.randint(1, 10**8),
+                        qtb.f_max,
+                        qtb.n_f,
+                    )
+                )
+            else:
+                lmp.command(
+                    "fix              3 all nvt temp %f %f %f"
+                    % (
+                        self.calc._temperature,
+                        self.calc._temperature,
+                        self.calc.md.thermostat_damping[1],
+                    )
+                )
+            lmp.command("run               %d" % int(self.calc.md.n_small_steps))
+            if self.calc._qtb:
+                lmp.command("unfix            3q")
+            lmp.command("unfix            3")
+
+        # fit the spring network and evaluate its free energy
+        self.build_harmonic_model()
+
+    def _sample_tdep_snapshots(self, lmp):
+        """
+        Collect thermal snapshots (positions + forces) from the
+        equilibrated MD trajectory for the TDEP effective-FC fit.
+
+        The cell is already equilibrated at the target (T, p) when this
+        runs, so we simply continue the dynamics and dump ``n_snapshots``
+        frames spaced ``sampling_interval`` steps apart. No minimisation
+        and no displacement is imposed; the reference sites are the mean
+        of these frames (computed in :meth:`build_harmonic_model`). The
+        final frame is left in place as the thermalised configuration
+        written to ``conf.equilibration.data``.
+        """
+        hr = self.calc.harmonic_reference
+        self.logger.info(
+            "TDEP sampling: %d frames every %d steps, cutoff %f A (hiphive "
+            "symmetry-aware FC2 from equilibrium MD)"
+            % (hr.n_snapshots, hr.sampling_interval, hr.cutoff)
         )
         if self.calc._qtb:
             qtb = self.calc.quantum_thermal_bath
@@ -349,13 +416,15 @@ class Solid(cph.Phase):
                     self.calc.md.thermostat_damping[1],
                 )
             )
-        lmp.command("run               %d" % int(self.calc.md.n_small_steps))
+        for s in range(hr.n_snapshots):
+            lmp.command("run               %d" % int(hr.sampling_interval))
+            lmp.command(
+                "write_dump        all custom harmonic.snapshot_%d.dump "
+                "id type x y z fx fy fz modify sort id" % s
+            )
         if self.calc._qtb:
             lmp.command("unfix            3q")
         lmp.command("unfix            3")
-
-        # fit the spring network and evaluate its free energy
-        self.build_harmonic_model()
 
     def build_harmonic_model(self):
         """
@@ -366,23 +435,7 @@ class Solid(cph.Phase):
         """
         hr = self.calc.harmonic_reference
 
-        ref = read_lammps_dump(
-            os.path.join(self.simfolder, "harmonic.reference.dump")
-        )
-        model = HarmonicModel(
-            reference_positions=ref["positions"],
-            box=ref["box"],
-            types=ref["types"],
-            masses=self.calc.mass,
-            ids=ref["ids"],
-            cutoff=hr.cutoff,
-            distance_tolerance=hr.distance_tolerance,
-        )
-        self.logger.info(
-            "Spring network: %d springs in %d bond types (shells)"
-            % (len(model.pairs), model.n_groups)
-        )
-
+        # fitting snapshots (positions + forces)
         positions = []
         forces = []
         for s in range(hr.n_snapshots):
@@ -391,9 +444,61 @@ class Solid(cph.Phase):
             )
             positions.append(snap["positions"])
             forces.append(snap["forces"])
+
+        # reference sites: the SYMMETRIC relaxed lattice (both backends) --
+        # building the fit's symmetry from the space group of a perfect
+        # crystal needs a symmetric reference, not a noisy sample mean
+        ref = read_lammps_dump(
+            os.path.join(self.simfolder, "harmonic.reference.dump")
+        )
+        ref_positions = ref["positions"]
+        ref_box, ref_types, ref_ids = ref["box"], ref["types"], ref["ids"]
+        # displacements (and forces) are referenced to the symmetric relaxed
+        # sites; the reference's own residual force (~0 after minimisation)
+        # is the base force for both fitting backends
         base_forces = ref.get("forces", None)
 
-        if hr.fitting_backend == "hiphive":
+        if hr.fitting_backend == "tdep":
+            # temperature-dependent effective potential: the fit data are
+            # thermal MD frames. For a perfect crystal the thermal mean sits
+            # on the symmetric relaxed sites (zero mean displacement by
+            # symmetry), so referencing to them is unbiased *and* keeps
+            # hiphive symmetry-reduced. Report how far the sampled mean
+            # actually drifts as an anharmonicity/symmetry diagnostic.
+            from calphy.harmonic import tdep_reference, minimum_image
+
+            mean_pos, mean_force = tdep_reference(positions, forces, ref_box)
+            drift = float(
+                np.abs(minimum_image(mean_pos - ref_positions, ref_box)).max()
+            )
+            self.logger.info(
+                "TDEP: fitting effective FC2 to %d MD frames; thermal-mean "
+                "drift from relaxed sites %.3f A, mean force %.2e eV/A"
+                % (hr.n_snapshots, drift, np.abs(mean_force).max())
+            )
+            if drift > 0.5 * hr.distance_tolerance:
+                self.logger.warning(
+                    "TDEP thermal-mean drift %.3f A exceeds half the shell "
+                    "tolerance; the sites may be under-sampled or the cell "
+                    "may be low-symmetry/relaxing (fit still valid, but "
+                    "consider more snapshots)." % drift
+                )
+
+        model = HarmonicModel(
+            reference_positions=ref_positions,
+            box=ref_box,
+            types=ref_types,
+            masses=self.calc.mass,
+            ids=ref_ids,
+            cutoff=hr.cutoff,
+            distance_tolerance=hr.distance_tolerance,
+        )
+        self.logger.info(
+            "Spring network: %d springs in %d bond types (shells)"
+            % (len(model.pairs), model.n_groups)
+        )
+
+        if hr.fitting_backend in ("hiphive", "tdep"):
             fit_with_hiphive(
                 model, positions, forces, base_forces=base_forces, logger=self.logger
             )
@@ -413,11 +518,12 @@ class Solid(cph.Phase):
 
         # exactly-quadratic force-constant reference: no tether (a
         # globally quadratic Hamiltonian cannot fold), no second leg
-        if hr.fitting_backend == "hiphive" and hasattr(model, "full_fc_blocks"):
+        if hr.fitting_backend in ("hiphive", "tdep") and hasattr(
+            model, "full_fc_blocks"
+        ):
             blocks = model.full_fc_blocks
             self.logger.info(
-                "fcpot reference uses full hiphive FC2 blocks (%d)"
-                % len(blocks)
+                "fcpot reference uses full FC2 blocks (%d)" % len(blocks)
             )
         else:
             blocks = model.fc_blocks(include_tether=False)
