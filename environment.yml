@@ -17,4 +17,4 @@ dependencies:
   - matplotlib
   - tqdm
   - pydantic >=2.3.0
-  - pyscal3
+  - pyscal3<4
