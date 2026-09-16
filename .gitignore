@@ -31,3 +31,6 @@ mt[0-9]*-ts-*/
 # OS / editor cruft
 .DS_Store
 .vscode/
+
+# artifact written into cwd by read_inputfile during test runs
+input_file.yaml
