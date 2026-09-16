@@ -331,3 +331,103 @@ def test_composition_scaling_integration(make_calc, recorded_job):
     _set_state(job)
     job.run_integration(iteration=1)
     assert_golden(rec.commands, "composition_scaling_integration")
+
+
+# --------------------------------------------------------------------------- #
+# Barostat targets at finite pressure (issue #3).  At p = 0 the goldens above
+# cannot tell a ramped barostat from a pinned one, so pin the numbers here:
+# the scaled-potential sweeps must run at λp, the real-thermostat ramps at p.
+# --------------------------------------------------------------------------- #
+P_BAR = 50000.0
+LF = 400.0 / 700.0           # B6/B8 sweep 400 -> 700 K
+P_LF = LF * P_BAR
+
+
+def _npt_fixes(commands, fix_id):
+    return [c for c in commands if c.startswith("fix %s all npt" % fix_id)]
+
+
+def _iso(cmd):
+    """(Pstart, Pstop) of an ``fix ... npt ... iso Pstart Pstop Pdamp`` line."""
+    tok = cmd.split()
+    i = tok.index("iso")
+    return float(tok[i + 1]), float(tok[i + 2])
+
+
+def _fix_before_sweep(commands, fix_id, sweep_file):
+    """The last ``fix <fix_id> all npt`` issued before the sweep's print fix."""
+    idx = next(
+        i for i, c in enumerate(commands)
+        if c.startswith("fix f3 all print") and c.endswith(sweep_file)
+    )
+    return [c for c in commands[:idx] if c.startswith("fix %s all npt" % fix_id)][-1]
+
+
+def test_ts_forward_barostat_ramps_to_lambda_p(make_calc, recorded_job):
+    calc = make_calc("B6", pressure=P_BAR, **LOOSE_TOL)
+    job, rec = recorded_job(Solid, calc)
+    _set_state(job)
+    job._reversible_scaling_forward(iteration=1)
+
+    fixes = _npt_fixes(rec.commands, "f1")
+    # warm start and COM-constrained equilibration hold the full pressure
+    assert _iso(fixes[0]) == (P_BAR, P_BAR)
+    assert _iso(fixes[1]) == (P_BAR, P_BAR)
+    # the sweep itself ramps p -> lf*p, with the COM temperature re-attached
+    sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.forward_1.dat")
+    assert _iso(sweep_fix) == pytest.approx((P_BAR, P_LF))
+    assert "fixedpoint ${xcm} ${ycm} ${zcm}" in sweep_fix
+    assert rec.commands[rec.commands.index(sweep_fix) + 1] == "fix_modify f1 temp tcm"
+
+
+def test_ts_backward_barostat_ramps_from_lambda_p(make_calc, recorded_job):
+    calc = make_calc("B6", pressure=P_BAR, **LOOSE_TOL)
+    job, rec = recorded_job(Solid, calc)
+    _set_state(job)
+    job._reversible_scaling_backward(iteration=1)
+
+    fixes = _npt_fixes(rec.commands, "f1")
+    # middle equilibration runs the lf-scaled potential, so it sits at lf*p
+    assert _iso(fixes[0]) == pytest.approx((P_LF, P_LF))
+    # the backward sweep ramps lf*p -> p
+    sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.backward_1.dat")
+    assert _iso(sweep_fix) == pytest.approx((P_LF, P_BAR))
+    assert rec.commands[rec.commands.index(sweep_fix) + 1] == "fix_modify f1 temp tcm"
+
+
+def test_ts_uniform_temperature_finite_p_warns(make_calc, recorded_job, caplog):
+    calc = make_calc(
+        "B6", pressure=P_BAR, lambda_schedule="uniform_temperature", **LOOSE_TOL
+    )
+    job, rec = recorded_job(Solid, calc)
+    _set_state(job)
+    job.logger.propagate = True
+    with caplog.at_level("WARNING"):
+        job._reversible_scaling_forward(iteration=1)
+    assert any("uniform_temperature" in r.message for r in caplog.records)
+    sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.forward_1.dat")
+    assert _iso(sweep_fix) == pytest.approx((P_BAR, P_LF))
+
+
+def test_tscale_holds_pressure_and_ramps_back(make_calc, recorded_job):
+    calc = make_calc("B8", pressure=P_BAR, **LOOSE_TOL)
+    job, rec = recorded_job(Solid, calc)
+    _set_state(job)
+    job.temperature_scaling(iteration=1)
+
+    # real thermostat + unscaled potential: every block sits on the isobar
+    for cmd in _npt_fixes(rec.commands, "1") + _npt_fixes(rec.commands, "f2"):
+        assert _iso(cmd) == (P_BAR, P_BAR), cmd
+    fwd = _fix_before_sweep(rec.commands, "f2", "ts.forward_1.dat").split()
+    bwd = _fix_before_sweep(rec.commands, "f2", "ts.backward_1.dat").split()
+    assert (fwd[5], fwd[6]) == ("400.000000", "700.000000")
+    assert (bwd[5], bwd[6]) == ("700.000000", "400.000000")
+
+
+def test_prescan_holds_pressure(make_calc, recorded_job):
+    calc = make_calc("B12", pressure=P_BAR)
+    job, rec = recorded_job(Solid, calc)
+    _set_state(job)
+    job.scan_temperature_range()
+    for cmd in _npt_fixes(rec.commands, "1") + _npt_fixes(rec.commands, "f2"):
+        assert _iso(cmd) == (P_BAR, P_BAR), cmd

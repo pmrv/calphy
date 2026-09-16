@@ -515,6 +515,10 @@ Controls how the scaling parameter λ is swept during reversible-scaling (`ts` m
 `lambda_schedule` changes only the **sampling density** (and hence how the statistical error is distributed) along the temperature axis — it does **not** change the computed free energy. The integration is performed over the actual λ grid, so both schedules integrate to the same G(T); `uniform_temperature` simply spreads the samples (and the resulting error bars) evenly in temperature. Keep the default `linear` unless you are running a wide-range sweep and specifically want an even error profile across it.
 ```
 
+```{warning}
+At finite `pressure` the scaled system has to be barostatted at **λp** during the sweep (sampling λU at (T₀, λp) is the real system at (T₀/λ, p)). LAMMPS `fix npt` can only ramp its target linearly over a run, which matches λp exactly for the `linear` schedule but only interpolates it between the sweep end points for `uniform_temperature`. Use `linear` for non-zero pressure; calphy logs a warning otherwise. At `pressure: 0` both schedules are exact.
+```
+
 The resulting free-energy-vs-temperature curve is written to `temperature_sweep.dat` — see [](outputfiles).
 
 ---
