@@ -1620,7 +1620,7 @@ class Phase:
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
 
-        # ── Barostat ramp pi → pf = lf*pi (see _rs_sweep_barostat) ─────────
+        # ── Barostat ramp pi -> pf = lf*pi (see _rs_sweep_barostat) ─────────
         if self.calc.npt:
             if (
                 self.calc.lambda_schedule == "uniform_temperature"
@@ -1849,7 +1849,7 @@ class Phase:
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
 
-        # ── Barostat ramp pf → pi (see _rs_sweep_barostat) ─────────────────
+        # ── Barostat ramp pf -> pi (see _rs_sweep_barostat) ─────────────────
         if self.calc.npt:
             self._rs_sweep_barostat(lmp, t0, pf, pi)
 
