@@ -1435,6 +1435,46 @@ class Phase:
         lmp.command("run               %d" % n_sweep)
         lmp.command("unfix             f3")
 
+    def _rs_sweep_barostat(self, lmp, t, p_start, p_stop):
+        """
+        Re-issue the COM-constrained ``npt`` fix ``f1`` with a pressure ramp
+        for a reversible-scaling sweep.
+
+        Sampling the scaled Hamiltonian λU at (T0, λp) is equivalent to
+        sampling U at (T0/λ, p).  The sweep therefore has to barostat the
+        scaled system at **λp**, not at the full target pressure p, for the
+        recorded volumes to lie on the real isobar that
+        :func:`~calphy.integrators.integrate_rs` assumes when it adds the
+        constant p·V term.  ``fix npt`` ramps its target linearly over a
+        ``run``, so the fix is re-defined here, immediately before the sweep
+        run, with the ramp ``p_start → p_stop``; the equilibration runs before
+        it stay at a constant pressure.  Re-defining the fix drops its
+        ``fix_modify`` settings, so the COM-corrected temperature compute is
+        re-attached.
+
+        The linear ramp reproduces λp exactly for the ``linear`` lambda
+        schedule.  For ``uniform_temperature`` λ is not linear in the step,
+        so the barostat follows the linear interpolation of λp between the
+        sweep end points instead (``fix npt`` accepts no variable targets).
+
+        Parameters
+        ----------
+        lmp : lammps object
+            Active LAMMPS instance with the ``xcm/ycm/zcm`` variables and the
+            ``tcm`` compute already defined.
+        t : float
+            Thermostat temperature (constant during the sweep).
+        p_start, p_stop : float
+            Barostat target at the start and at the end of the sweep run.
+        """
+        lmp.command(
+            "fix               f1 all npt temp %f %f %f %s %f %f %f "
+            "fixedpoint ${xcm} ${ycm} ${zcm}"
+            % (t, t, self.calc.md.thermostat_damping[1],
+               self.iso, p_start, p_stop, self.calc.md.barostat_damping[1])
+        )
+        lmp.command("fix_modify        f1 temp tcm")
+
     def _reversible_scaling_forward(self, iteration: int = 1) -> None:
         """
         Perform the forward sweep of a reversible-scaling calculation.
@@ -1579,6 +1619,22 @@ class Phase:
         lmp.command(ph.scaled_pair_style_command(self.calc, ["v_flambda"]))
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
+
+        # ── Barostat ramp pi -> pf = lf*pi (see _rs_sweep_barostat) ─────────
+        if self.calc.npt:
+            if (
+                self.calc.lambda_schedule == "uniform_temperature"
+                and pi != 0.0
+            ):
+                self.logger.warning(
+                    "lambda_schedule 'uniform_temperature' at P = %.1f bar: "
+                    "the barostat target follows the linear interpolation of "
+                    "λP between the sweep end points, not λP itself, so the "
+                    "swept volumes deviate from the isobar in the middle of "
+                    "the sweep.  Use lambda_schedule 'linear' for finite "
+                    "pressure.", pi,
+                )
+            self._rs_sweep_barostat(lmp, t0, pi, pf)
 
         # ── Optional MC swaps ───────────────────────────────────────────────
         if (
@@ -1726,12 +1782,15 @@ class Phase:
         lmp.command("variable         ycm equal xcm(all,y)")
         lmp.command("variable         zcm equal xcm(all,z)")
 
+        # The potential is scaled by lf here, so the barostat has to hold the
+        # scaled pressure pf = lf*pi for this state to be the real system at
+        # (Tf, pi) -- see _rs_sweep_barostat.
         if self.calc.npt:
             lmp.command(
                 "fix               f1 all npt temp %f %f %f %s %f %f %f "
                 "fixedpoint ${xcm} ${ycm} ${zcm}"
                 % (t0, t0, self.calc.md.thermostat_damping[1],
-                   self.iso, pi, pi, self.calc.md.barostat_damping[1])
+                   self.iso, pf, pf, self.calc.md.barostat_damping[1])
             )
         else:
             lmp.command(
@@ -1789,6 +1848,10 @@ class Phase:
         lmp.command(ph.scaled_pair_style_command(self.calc, ["v_blambda"]))
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
+
+        # ── Barostat ramp pf -> pi (see _rs_sweep_barostat) ─────────────────
+        if self.calc.npt:
+            self._rs_sweep_barostat(lmp, t0, pf, pi)
 
         # ── Optional MC swaps ───────────────────────────────────────────────
         if (
@@ -1996,12 +2059,13 @@ class Phase:
         lmp.command("unfix             1")
 
         # ── Real-thermostat ramp T0 -> Tf, recording every step ─────────────
-        pf = (t0 / tf) * p0
+        # The real system is heated along the isobar, so the barostat stays
+        # at p0 (the λp ramp belongs to the scaled-potential sweep only).
         lmp.command("variable          dU      equal pe/atoms")
         lmp.command(
             "fix               f2 all npt temp %f %f %f %s %f %f %f"
             % (t0, tf, self.calc.md.thermostat_damping[1],
-               self.iso, p0, pf, self.calc.md.barostat_damping[1])
+               self.iso, p0, p0, self.calc.md.barostat_damping[1])
         )
         scan_file = "prescan.forward.dat"
         lmp.command(
@@ -2155,8 +2219,10 @@ class Phase:
         tf = self.calc._temperature_stop
         li = 1
         lf = t0 / tf
+        # tscale ramps the real thermostat with the unscaled potential, so
+        # the barostat stays at the target pressure throughout (the λp ramp
+        # belongs to the scaled-potential sweep in mode ts).
         p0 = self.calc._pressure
-        pf = lf * p0
 
         # create lammps object
         lmp = ph.create_object(self.calc, self.simfolder)
@@ -2208,7 +2274,7 @@ class Phase:
                 self.calc.md.thermostat_damping[1],
                 self.iso,
                 p0,
-                pf,
+                p0,
                 self.calc.md.barostat_damping[1],
             )
         )
@@ -2234,8 +2300,8 @@ class Phase:
                 tf,
                 self.calc.md.thermostat_damping[1],
                 self.iso,
-                pf,
-                pf,
+                p0,
+                p0,
                 self.calc.md.barostat_damping[1],
             )
         )
@@ -2255,18 +2321,18 @@ class Phase:
         else:
             self.check_if_solidfied(lmp, "traj.temp.dat")
 
-        # start reverse loop
+        # start reverse loop: thermostat ramps back tf -> t0
         lmp.command("variable          lambda equal ramp(${lf},${li})")
 
         lmp.command(
             "fix               f2 all npt temp %f %f %f %s %f %f %f"
             % (
-                t0,
+                tf,
                 t0,
                 self.calc.md.thermostat_damping[1],
                 self.iso,
                 p0,
-                pf,
+                p0,
                 self.calc.md.barostat_damping[1],
             )
         )
