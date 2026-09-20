@@ -515,6 +515,10 @@ Controls how the scaling parameter λ is swept during reversible-scaling (`ts` m
 `lambda_schedule` changes only the **sampling density** (and hence how the statistical error is distributed) along the temperature axis — it does **not** change the computed free energy. The integration is performed over the actual λ grid, so both schedules integrate to the same G(T); `uniform_temperature` simply spreads the samples (and the resulting error bars) evenly in temperature. Keep the default `linear` unless you are running a wide-range sweep and specifically want an even error profile across it.
 ```
 
+```{warning}
+`uniform_temperature` is only available at `pressure: 0` (or with `npt: false`). During a barostatted sweep the scaled system has to be held at **λp** (sampling λU at (T₀, λp) is the real system at (T₀/λ, p)), and LAMMPS barostats can only ramp their target linearly over a run, which equals λp only when λ is linear in the MD step, i.e. for the `linear` schedule. Combining `uniform_temperature` with a finite pressure is rejected at input validation.
+```
+
 The resulting free-energy-vs-temperature curve is written to `temperature_sweep.dat` — see [](outputfiles).
 
 ---

@@ -11,7 +11,7 @@ dependencies:
   - pyyaml
   - mendeleev
   - numpy
-  - pyscal3
+  - pyscal3<4
   - matplotlib
   - tqdm
   - pydantic >=2.3.0

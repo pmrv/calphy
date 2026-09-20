@@ -782,6 +782,22 @@ class Calculation(_StrictInput, title="Main input class"):
         else:
             self._pressure_coupling = "iso" if self._iso else "aniso"
 
+        # A barostatted reversible-scaling sweep has to hold the scaled
+        # system at lambda*p, and fix npt can only ramp its target linearly
+        # over a run.  That matches lambda*p for the linear schedule only;
+        # uniform_temperature makes lambda a hyperbola in the step.
+        if (
+            self.lambda_schedule == "uniform_temperature"
+            and self.npt
+            and self._pressure not in (None, 0)
+        ):
+            raise ValueError(
+                "lambda_schedule 'uniform_temperature' is only supported at "
+                "pressure 0 (or with npt: false): the sweep barostat can only "
+                "ramp linearly in the MD step, which equals lambda*p for the "
+                "'linear' schedule only. Use lambda_schedule: linear."
+            )
+
         self._temperature_input = copy.copy(self.temperature)
         # guess a melting temp of the system, this will be mostly ignored
         # chem = mendeleev.element(self.element[0])
