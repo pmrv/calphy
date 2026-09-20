@@ -395,18 +395,18 @@ def test_ts_backward_barostat_ramps_from_lambda_p(make_calc, recorded_job):
     assert rec.commands[rec.commands.index(sweep_fix) + 1] == "fix_modify f1 temp tcm"
 
 
-def test_ts_uniform_temperature_finite_p_warns(make_calc, recorded_job, caplog):
-    calc = make_calc(
-        "B6", pressure=P_BAR, lambda_schedule="uniform_temperature", **LOOSE_TOL
+def test_ts_uniform_temperature_refused_at_finite_p(make_calc):
+    with pytest.raises(ValueError, match="uniform_temperature"):
+        make_calc(
+            "B6", pressure=P_BAR, lambda_schedule="uniform_temperature",
+            **LOOSE_TOL
+        )
+    # p = 0 and NVT stay allowed
+    make_calc("B6", pressure=0.0, lambda_schedule="uniform_temperature", **LOOSE_TOL)
+    make_calc(
+        "B6", pressure=P_BAR, npt=False, lambda_schedule="uniform_temperature",
+        **LOOSE_TOL
     )
-    job, rec = recorded_job(Solid, calc)
-    _set_state(job)
-    job.logger.propagate = True
-    with caplog.at_level("WARNING"):
-        job._reversible_scaling_forward(iteration=1)
-    assert any("uniform_temperature" in r.message for r in caplog.records)
-    sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.forward_1.dat")
-    assert _iso(sweep_fix) == pytest.approx((P_BAR, P_LF))
 
 
 def test_tscale_holds_pressure_and_ramps_back(make_calc, recorded_job):

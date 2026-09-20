@@ -1452,10 +1452,11 @@ class Phase:
         ``fix_modify`` settings, so the COM-corrected temperature compute is
         re-attached.
 
-        The linear ramp reproduces λp exactly for the ``linear`` lambda
-        schedule.  For ``uniform_temperature`` λ is not linear in the step,
-        so the barostat follows the linear interpolation of λp between the
-        sweep end points instead (``fix npt`` accepts no variable targets).
+        The ramp reproduces λp exactly because λ is linear in the step for
+        the ``linear`` schedule.  ``uniform_temperature`` makes λ a hyperbola
+        in the step, and no LAMMPS barostat accepts a variable target, so
+        that schedule is refused at finite pressure by the input validation
+        (at p = 0 the ramp is 0 → 0 and the schedule is exact).
 
         Parameters
         ----------
@@ -1622,18 +1623,6 @@ class Phase:
 
         # ── Barostat ramp pi -> pf = lf*pi (see _rs_sweep_barostat) ─────────
         if self.calc.npt:
-            if (
-                self.calc.lambda_schedule == "uniform_temperature"
-                and pi != 0.0
-            ):
-                self.logger.warning(
-                    "lambda_schedule 'uniform_temperature' at P = %.1f bar: "
-                    "the barostat target follows the linear interpolation of "
-                    "λP between the sweep end points, not λP itself, so the "
-                    "swept volumes deviate from the isobar in the middle of "
-                    "the sweep.  Use lambda_schedule 'linear' for finite "
-                    "pressure.", pi,
-                )
             self._rs_sweep_barostat(lmp, t0, pi, pf)
 
         # ── Optional MC swaps ───────────────────────────────────────────────

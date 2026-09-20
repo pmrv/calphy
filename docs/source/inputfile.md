@@ -516,7 +516,7 @@ Controls how the scaling parameter λ is swept during reversible-scaling (`ts` m
 ```
 
 ```{warning}
-At finite `pressure` the scaled system has to be barostatted at **λp** during the sweep (sampling λU at (T₀, λp) is the real system at (T₀/λ, p)). LAMMPS `fix npt` can only ramp its target linearly over a run, which matches λp exactly for the `linear` schedule but only interpolates it between the sweep end points for `uniform_temperature`. Use `linear` for non-zero pressure; calphy logs a warning otherwise. At `pressure: 0` both schedules are exact.
+`uniform_temperature` is only available at `pressure: 0` (or with `npt: false`). During a barostatted sweep the scaled system has to be held at **λp** (sampling λU at (T₀, λp) is the real system at (T₀/λ, p)), and LAMMPS barostats can only ramp their target linearly over a run, which equals λp only when λ is linear in the MD step, i.e. for the `linear` schedule. Combining `uniform_temperature` with a finite pressure is rejected at input validation.
 ```
 
 The resulting free-energy-vs-temperature curve is written to `temperature_sweep.dat` — see [](outputfiles).
