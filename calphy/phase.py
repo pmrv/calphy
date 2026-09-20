@@ -1317,6 +1317,13 @@ class Phase:
     # Length of a warm start, in barostat (NVT: thermostat) relaxation times.
     WARM_START_RELAXATION_TIMES = 10
 
+    # uniform_temperature sweeps are run as piecewise-linear λ segments (see
+    # _sweep_segments): at most SWEEP_MAX_SEGMENTS of them, each at least
+    # SWEEP_SEGMENT_RELAXATION_TIMES barostat (or thermostat) damping times
+    # long, since every segment boundary re-issues the integrator fix.
+    SWEEP_MAX_SEGMENTS = 20
+    SWEEP_SEGMENT_RELAXATION_TIMES = 10
+
     def _warm_start_steps(self, npt: bool) -> int:
         """
         Number of MD steps for a warm start: a short run that re-thermalises a
@@ -1399,17 +1406,82 @@ class Phase:
         )
         return default
 
+    def _sweep_segments(self, t0, tf, backward=False):
+        """
+        Piecewise-linear λ segments for the ``uniform_temperature`` schedule.
+
+        The schedule wants the equivalent temperature T0/λ to advance linearly
+        in MD steps, i.e. λ(s) = T0 / (T0 + (Tf - T0) s), a hyperbola in the
+        step fraction s.  A barostatted sweep has to hold the scaled system at
+        λp (see :meth:`_rs_sweep_barostat`), and ``fix npt`` can only ramp its
+        target linearly over one ``run`` (no barostat fix accepts a variable
+        target).  Instead of approximating λp by a chord, the schedule itself
+        is made piecewise linear: the sweep is split into K sub-runs whose λ
+        end points lie on the hyperbola, and within each sub-run λ follows
+        ``ramp()`` between them.  The barostat chord p·λ_a → p·λ_b then equals
+        λp at *every* step, so the sampled volumes are exactly on the isobar
+        and the free-energy integral (over the recorded λ grid) is exact; the
+        only approximation left is in the sampling density, which deviates
+        from "uniform in T" by O(1/K²) (0.2 % at K = 20 for a 1000 → 3000 K
+        sweep).
+
+        Every segment boundary re-issues the integrator fix, which zeroes the
+        barostat velocity, so segments are kept at least
+        ``SWEEP_SEGMENT_RELAXATION_TIMES`` damping times long and K is capped
+        at ``SWEEP_MAX_SEGMENTS``.
+
+        Parameters
+        ----------
+        t0, tf : float
+            Sweep start and stop temperature (of the real system).
+        backward : bool
+            If True the segments run from λ = t0/tf back to 1.
+
+        Returns
+        -------
+        list of (n_steps, lambda_start, lambda_stop)
+            One entry per sub-run; the step counts sum to ``_n_sweep_steps``.
+        """
+        n_sweep = self.calc._n_sweep_steps
+        damping = (
+            self.calc.md.barostat_damping[1]
+            if self.calc.npt
+            else self.calc.md.thermostat_damping[1]
+        )
+        min_len = max(
+            1,
+            int(round(self.SWEEP_SEGMENT_RELAXATION_TIMES * damping
+                      / self.calc.md.timestep)),
+        )
+        n_seg = max(1, min(self.SWEEP_MAX_SEGMENTS, n_sweep // min_len))
+        temps = [t0 + (tf - t0) * k / n_seg for k in range(n_seg + 1)]
+        if backward:
+            temps.reverse()
+        lambdas = [t0 / t for t in temps]
+        base, extra = divmod(n_sweep, n_seg)
+        steps = [base + (1 if k < extra else 0) for k in range(n_seg)]
+        return [(steps[k], lambdas[k], lambdas[k + 1]) for k in range(n_seg)]
+
     def _run_sweep(
         self,
         lmp,
         lambda_var: str,
         output_file_pattern: str,
         sweep_label: str,
+        segments=None,
+        barostat=None,
     ) -> None:
         """
-        Run a forward or backward sweep as a single continuous LAMMPS run.
+        Run a forward or backward sweep, recording ``dU press vol lambda`` at
+        every step to ``output_file_pattern``.
 
-        Records ``dU press vol lambda`` at every step to ``output_file_pattern``.
+        Without ``segments`` the sweep is a single continuous LAMMPS run.
+        With ``segments`` (see :meth:`_sweep_segments`) it is a sequence of
+        sub-runs: before each one ``lambda_var`` is redefined as a ``ramp()``
+        between the segment's λ end points and, if ``barostat`` is given, the
+        integrator fix is re-issued with the matching pressure chord
+        p·λ_a → p·λ_b.  The print fix spans all sub-runs, so the output file
+        is one continuous sweep.
 
         Parameters
         ----------
@@ -1424,6 +1496,11 @@ class Phase:
             Name for the output data file, e.g. ``"ts.forward_1.dat"``.
         sweep_label : str
             Human-readable label used in log messages.
+        segments : list of (n_steps, lambda_start, lambda_stop), optional
+            Piecewise-linear λ schedule; ``None`` runs the sweep as is.
+        barostat : (t, p), optional
+            Thermostat temperature and real target pressure for the per-segment
+            barostat chords; ignored without ``segments``.
         """
         n_sweep = self.calc._n_sweep_steps
         lmp.command(
@@ -1431,8 +1508,23 @@ class Phase:
             'title "# dU[eV/atom] press[bar] vol[A^3] lambda" '
             'screen no file %s' % (lambda_var, output_file_pattern)
         )
-        self.logger.info("ts-sweep %s: %d steps", sweep_label, n_sweep)
-        lmp.command("run               %d" % n_sweep)
+        if segments is None:
+            self.logger.info("ts-sweep %s: %d steps", sweep_label, n_sweep)
+            lmp.command("run               %d" % n_sweep)
+        else:
+            self.logger.info(
+                "ts-sweep %s: %d steps in %d piecewise-linear λ segments",
+                sweep_label, n_sweep, len(segments),
+            )
+            for n_steps, l_start, l_stop in segments:
+                lmp.command(
+                    "variable         %s equal ramp(%f,%f)"
+                    % (lambda_var, l_start, l_stop)
+                )
+                if barostat is not None:
+                    t, p = barostat
+                    self._rs_sweep_barostat(lmp, t, l_start * p, l_stop * p)
+                lmp.command("run               %d" % n_steps)
         lmp.command("unfix             f3")
 
     def _rs_sweep_barostat(self, lmp, t, p_start, p_stop):
@@ -1452,11 +1544,10 @@ class Phase:
         ``fix_modify`` settings, so the COM-corrected temperature compute is
         re-attached.
 
-        The ramp reproduces λp exactly because λ is linear in the step for
-        the ``linear`` schedule.  ``uniform_temperature`` makes λ a hyperbola
-        in the step, and no LAMMPS barostat accepts a variable target, so
-        that schedule is refused at finite pressure by the input validation
-        (at p = 0 the ramp is 0 → 0 and the schedule is exact).
+        The ramp equals λp exactly because λ is linear in the step within a
+        run: directly for the ``linear`` schedule, and per segment for
+        ``uniform_temperature``, which :meth:`_sweep_segments` makes piecewise
+        linear for exactly this reason.
 
         Parameters
         ----------
@@ -1586,28 +1677,21 @@ class Phase:
         # ----------------------------------------------------------------
         # Lambda schedule for the forward sweep.
         #
-        # "linear" (default): lambda = ramp(li, lf) — simple linear
-        #   interpolation; LAMMPS ramp() resets automatically each run.
+        # "linear" (default): lambda = ramp(li, lf) over one run; LAMMPS
+        #   ramp() resets automatically each run.
         #
-        # "uniform_temperature": T_eq(s) = T0/lambda is linear in step
-        #   so every Kelvin bin gets the same number of MD samples.
-        #   Requires explicit step0 capture before each sweep.
+        # "uniform_temperature": T_eq = T0/lambda advances linearly in step
+        #   so every Kelvin bin gets the same number of MD samples.  Run as
+        #   piecewise-linear segments (see _sweep_segments); the variables
+        #   are placeholders here and are redefined per segment by
+        #   _run_sweep.
         # ----------------------------------------------------------------
         lmp.command("variable         T0_rs equal %f" % t0)
+        segments = None
         if self.calc.lambda_schedule == "uniform_temperature":
-            lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
-            lmp.command("variable         Tf_rs equal %f" % tf)
-            # Capture the step at the START of the sweep so the formula is
-            # independent of any prior MD steps (no reset_timestep needed).
-            lmp.command("variable         step0 equal $(step)")
-            lmp.command(
-                "variable         flambda equal "
-                "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-            lmp.command(
-                "variable         blambda equal "
-                "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
+            segments = self._sweep_segments(t0, tf)
+            lmp.command("variable         flambda equal %f" % li)
+            lmp.command("variable         blambda equal %f" % lf)
         else:  # "linear" (default)
             lmp.command("variable         flambda equal ramp(${li},${lf})")
             lmp.command("variable         blambda equal ramp(${lf},${li})")
@@ -1622,7 +1706,9 @@ class Phase:
             lmp.command(cmd)
 
         # ── Barostat ramp pi -> pf = lf*pi (see _rs_sweep_barostat) ─────────
-        if self.calc.npt:
+        # For the segmented schedule the chords are issued per segment inside
+        # _run_sweep instead.
+        if self.calc.npt and segments is None:
             self._rs_sweep_barostat(lmp, t0, pi, pf)
 
         # ── Optional MC swaps ───────────────────────────────────────────────
@@ -1663,6 +1749,8 @@ class Phase:
                 lambda_var="flambda",
                 output_file_pattern="ts.forward_%d.dat" % iteration,
                 sweep_label="forward (iteration %d)" % iteration,
+                segments=segments,
+                barostat=(t0, pi) if self.calc.npt else None,
             )
         except Exception:
             # Close the runner and rotate the log before the exception
@@ -1816,18 +1904,12 @@ class Phase:
         # variables, then re-install hybrid/scaled driven by blambda.
         # T0_rs is needed by both schedules for ftemp/btemp.
         lmp.command("variable         T0_rs equal %f" % t0)
+        segments = None
         if self.calc.lambda_schedule == "uniform_temperature":
-            lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
-            lmp.command("variable         Tf_rs equal %f" % tf)
-            lmp.command("variable         step0 equal $(step)")
-            lmp.command(
-                "variable         flambda equal "
-                "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-            lmp.command(
-                "variable         blambda equal "
-                "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
+            # placeholders, redefined per segment by _run_sweep
+            segments = self._sweep_segments(t0, tf, backward=True)
+            lmp.command("variable         flambda equal %f" % li)
+            lmp.command("variable         blambda equal %f" % lf)
         else:  # "linear"
             lmp.command("variable         flambda equal ramp(${li},${lf})")
             lmp.command("variable         blambda equal ramp(${lf},${li})")
@@ -1839,7 +1921,9 @@ class Phase:
             lmp.command(cmd)
 
         # ── Barostat ramp pf -> pi (see _rs_sweep_barostat) ─────────────────
-        if self.calc.npt:
+        # For the segmented schedule the chords are issued per segment inside
+        # _run_sweep instead.
+        if self.calc.npt and segments is None:
             self._rs_sweep_barostat(lmp, t0, pf, pi)
 
         # ── Optional MC swaps ───────────────────────────────────────────────
@@ -1879,6 +1963,8 @@ class Phase:
             lambda_var="blambda",
             output_file_pattern="ts.backward_%d.dat" % iteration,
             sweep_label="backward (iteration %d)" % iteration,
+            segments=segments,
+            barostat=(t0, pi) if self.calc.npt else None,
         )
         self.logger.info("backward sweep (iteration %d): sweep done", iteration)
 
