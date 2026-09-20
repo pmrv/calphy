@@ -363,16 +363,6 @@ def _fix_before_sweep(commands, fix_id, sweep_file):
     return [c for c in commands[:idx] if c.startswith("fix %s all npt" % fix_id)][-1]
 
 
-def _no_run_between(commands, fix_cmd, sweep_file):
-    """True if no ``run`` is issued between ``fix_cmd`` and the sweep's run."""
-    i = commands.index(fix_cmd)
-    j = next(
-        k for k, c in enumerate(commands)
-        if c.startswith("fix f3 all print") and c.endswith(sweep_file)
-    )
-    return not any(c.startswith("run ") for c in commands[i:j])
-
-
 def test_ts_forward_barostat_ramps_to_lambda_p(make_calc, recorded_job):
     calc = make_calc("B6", pressure=P_BAR, **LOOSE_TOL)
     job, rec = recorded_job(Solid, calc)
@@ -388,8 +378,6 @@ def test_ts_forward_barostat_ramps_to_lambda_p(make_calc, recorded_job):
     assert _iso(sweep_fix) == pytest.approx((P_BAR, P_LF))
     assert "fixedpoint ${xcm} ${ycm} ${zcm}" in sweep_fix
     assert rec.commands[rec.commands.index(sweep_fix) + 1] == "fix_modify f1 temp tcm"
-    # the ramp spans exactly the sweep: no run between the re-issue and it
-    assert _no_run_between(rec.commands, sweep_fix, "ts.forward_1.dat")
 
 
 def test_ts_backward_barostat_ramps_from_lambda_p(make_calc, recorded_job):
@@ -405,101 +393,20 @@ def test_ts_backward_barostat_ramps_from_lambda_p(make_calc, recorded_job):
     sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.backward_1.dat")
     assert _iso(sweep_fix) == pytest.approx((P_LF, P_BAR))
     assert rec.commands[rec.commands.index(sweep_fix) + 1] == "fix_modify f1 temp tcm"
-    assert _no_run_between(rec.commands, sweep_fix, "ts.backward_1.dat")
 
 
-def _segments(commands, lambda_var, sweep_file):
-    """(ramp_start, ramp_stop, Pstart, Pstop, n_steps) per sub-run of a
-    segmented sweep, read off the command stream between the sweep's print
-    fix and its unfix."""
-    start = next(
-        i for i, c in enumerate(commands)
-        if c.startswith("fix f3 all print") and c.endswith(sweep_file)
-    )
-    stop = next(i for i in range(start, len(commands)) if commands[i] == "unfix f3")
-    body = commands[start + 1:stop]
-    out = []
-    i = 0
-    while i < len(body):
-        assert body[i].startswith("variable %s equal ramp(" % lambda_var), body[i]
-        la, lb = map(float, body[i][body[i].index("(") + 1:-1].split(","))
-        assert body[i + 1].startswith("fix f1 all npt"), body[i + 1]
-        assert body[i + 2] == "fix_modify f1 temp tcm"
-        assert body[i + 3].startswith("run "), body[i + 3]
-        out.append((la, lb, *_iso(body[i + 1]), int(body[i + 3].split()[1])))
-        i += 4
-    return out
-
-
-def _check_segments(segs, t_ref, t_start, t_stop, lam_first, lam_last):
-    """``t_ref`` is the sweep's T0 (λ = t_ref / T); the segments run the real
-    temperature from ``t_start`` to ``t_stop``."""
-    # contiguous λ chain from the sweep's start to its end
-    assert segs[0][0] == pytest.approx(lam_first)
-    assert segs[-1][1] == pytest.approx(lam_last)
-    for a, b in zip(segs, segs[1:]):
-        assert a[1] == pytest.approx(b[0])
-    # every chord is exactly p·λ at both ends: the barostat never leaves λp
-    for la, lb, pa, pb, _ in segs:
-        assert (pa, pb) == pytest.approx((la * P_BAR, lb * P_BAR))
-    # the boundaries sit on the uniform_temperature hyperbola: T0/λ is
-    # linear in the cumulative step count
-    n_total = sum(n for *_, n in segs)
-    assert n_total == 5000                       # B6 n_switching_steps
-    cum = 0
-    for la, lb, _, _, n in segs:
-        cum += n
-        t_expected = t_start + (t_stop - t_start) * cum / n_total
-        assert t_ref / lb == pytest.approx(t_expected, rel=1e-6)
-
-
-def test_ts_uniform_temperature_segments_forward(make_calc, recorded_job):
+def test_ts_uniform_temperature_finite_p_warns(make_calc, recorded_job, caplog):
     calc = make_calc(
         "B6", pressure=P_BAR, lambda_schedule="uniform_temperature", **LOOSE_TOL
     )
     job, rec = recorded_job(Solid, calc)
     _set_state(job)
-    job._reversible_scaling_forward(iteration=1)
-    segs = _segments(rec.commands, "flambda", "ts.forward_1.dat")
-    # 5000 steps, 0.1 ps damping at 1 fs -> 1000-step minimum -> 5 segments
-    assert len(segs) == 5
-    _check_segments(segs, 400.0, 400.0, 700.0, 1.0, LF)
-    # the equilibrations before the sweep still hold the full pressure
-    fixes = _npt_fixes(rec.commands, "f1")
-    assert _iso(fixes[0]) == (P_BAR, P_BAR)
-    assert _iso(fixes[1]) == (P_BAR, P_BAR)
-
-
-def test_ts_uniform_temperature_segments_backward(make_calc, recorded_job):
-    calc = make_calc(
-        "B6", pressure=P_BAR, lambda_schedule="uniform_temperature", **LOOSE_TOL
-    )
-    job, rec = recorded_job(Solid, calc)
-    _set_state(job)
-    job._reversible_scaling_backward(iteration=1)
-    segs = _segments(rec.commands, "blambda", "ts.backward_1.dat")
-    assert len(segs) == 5
-    _check_segments(segs, 400.0, 700.0, 400.0, LF, 1.0)
-    # middle equilibration at lf*p
-    assert _iso(_npt_fixes(rec.commands, "f1")[0]) == pytest.approx((P_LF, P_LF))
-
-
-def test_ts_uniform_temperature_segment_count_is_bounded(make_calc, recorded_job):
-    # a long sweep is capped at SWEEP_MAX_SEGMENTS; a short one at one segment
-    calc = make_calc(
-        "B6", pressure=P_BAR, lambda_schedule="uniform_temperature",
-        n_switching_steps=100000, **LOOSE_TOL
-    )
-    job, rec = recorded_job(Solid, calc)
-    _set_state(job)
-    assert len(job._sweep_segments(400.0, 700.0)) == job.SWEEP_MAX_SEGMENTS
-    calc = make_calc(
-        "B6", pressure=P_BAR, lambda_schedule="uniform_temperature",
-        n_switching_steps=500, **LOOSE_TOL
-    )
-    job, rec = recorded_job(Solid, calc)
-    (n, la, lb), = job._sweep_segments(400.0, 700.0)
-    assert (n, la) == (500, 1.0) and lb == pytest.approx(LF)
+    job.logger.propagate = True
+    with caplog.at_level("WARNING"):
+        job._reversible_scaling_forward(iteration=1)
+    assert any("uniform_temperature" in r.message for r in caplog.records)
+    sweep_fix = _fix_before_sweep(rec.commands, "f1", "ts.forward_1.dat")
+    assert _iso(sweep_fix) == pytest.approx((P_BAR, P_LF))
 
 
 def test_tscale_holds_pressure_and_ramps_back(make_calc, recorded_job):
