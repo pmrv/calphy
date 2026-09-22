@@ -38,10 +38,28 @@ other part of calphy) never requires it.
 """
 import os
 import logging
+import threading
 
 from calphy.runner import BaseRunner, _normalize_cmdargs
 
 logger = logging.getLogger(__name__)
+
+# ``threading._register_atexit`` is private, but it is the *only* hook that runs
+# early enough to matter here.  ``atexit`` callbacks run **after**
+# ``threading._shutdown`` has already joined every non-daemon thread, so an
+# ``atexit`` hook that shuts an executor down never gets the chance to run: the
+# interpreter is already blocked joining the very threads the hook would
+# release.  ``threading._register_atexit`` callbacks run *inside*
+# ``threading._shutdown``, before that join.  This is exactly why the stdlib's
+# own ``concurrent.futures.thread`` uses it (``Lib/concurrent/futures/thread.py``)
+# rather than ``atexit``.  Degrade gracefully if a future CPython drops it --
+# the explicit ``close()`` calls on the success path are unaffected.
+_register_atexit = getattr(threading, "_register_atexit", None)
+if _register_atexit is None:  # pragma: no cover - depends on CPython internals
+    logger.debug(
+        "threading._register_atexit is unavailable; a LAMMPS session leaked by "
+        "an escaping exception will not be closed at interpreter shutdown."
+    )
 
 
 class LibraryRunner(BaseRunner):
@@ -81,7 +99,47 @@ class LibraryRunner(BaseRunner):
         self.lmp = LammpsLibrary(
             cores=cores, working_directory=directory, cmdargs=cmdargs
         )
+        self._register_shutdown_hook()
         self._activate_mliap()
+
+    def _register_shutdown_hook(self):
+        """Make sure the session is closed even if an exception escapes.
+
+        pylammpsmpi drives LAMMPS through executorlib, whose task threads are
+        *non-daemon* and block on ``queue.get()`` until the executor is shut
+        down -- which only happens via :meth:`close`.  If an exception escapes
+        between creating a runner and closing it, ``close()`` is never reached,
+        those threads never return, and ``threading._shutdown`` blocks joining
+        them forever: the process never exits and keeps its whole allocation
+        until walltime (see ICAMS/calphy issue on the 48 h hang).
+
+        The hook keeps a *strong* reference to the bound method on purpose.  A
+        ``weakref`` would be collected in precisely the situation this guards
+        against: once the exception has propagated out and its traceback is
+        released, the driver frame holding ``lmp`` is gone and the runner
+        becomes collectable while executorlib's threads are still blocked --
+        the hook would then find a dead referent and the hang would come back.
+        The cost of the strong reference is one *already closed* runner per
+        stage (a dozen or so per job), which is negligible; :meth:`close` is
+        idempotent via ``self._closed``, so the hook is a no-op for every
+        runner that was closed normally.
+        """
+        if _register_atexit is None:
+            return
+        _register_atexit(self._close_at_shutdown)
+
+    def _close_at_shutdown(self):
+        """Shutdown-hook wrapper around :meth:`close`; never raises."""
+        if self._closed:
+            return
+        logger.warning(
+            "LAMMPS session in %s was not closed explicitly; closing it at "
+            "interpreter shutdown so the process can exit.", self.directory,
+        )
+        try:
+            self.close()
+        except Exception:  # pragma: no cover - best effort at shutdown
+            logger.exception("failed to close the LAMMPS session at shutdown")
 
     def _activate_mliap(self):
         """Register the mliappy coupling in the live session when available.
