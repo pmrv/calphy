@@ -283,3 +283,70 @@ def test_module_imports_without_pylammpsmpi():
     )
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# Shutdown hook (issue #7): a runner must close even if an exception escapes
+# --------------------------------------------------------------------------- #
+def test_registers_threading_atexit_hook(fake_pylammpsmpi, tmp_path, monkeypatch):
+    """The hook must go through threading._register_atexit, not atexit.
+
+    atexit callbacks run *after* threading._shutdown has joined every
+    non-daemon thread, so an atexit hook can never release executorlib's
+    blocked task threads.
+    """
+    import calphy.library_runner as lr
+
+    registered = []
+    monkeypatch.setattr(lr, "_register_atexit", registered.append)
+    runner = make_runner(tmp_path)
+    assert registered == [runner._close_at_shutdown]
+
+
+def test_shutdown_hook_closes_unclosed_session(fake_pylammpsmpi, tmp_path, monkeypatch):
+    import calphy.library_runner as lr
+
+    registered = []
+    monkeypatch.setattr(lr, "_register_atexit", registered.append)
+    runner = make_runner(tmp_path)
+    assert not runner.lmp.closed
+    registered[0]()
+    assert runner.lmp.closed
+    assert runner._closed
+
+
+def test_shutdown_hook_is_a_noop_after_close(fake_pylammpsmpi, tmp_path, monkeypatch):
+    import calphy.library_runner as lr
+
+    registered = []
+    monkeypatch.setattr(lr, "_register_atexit", registered.append)
+    runner = make_runner(tmp_path)
+    runner.close()
+    closes = []
+    monkeypatch.setattr(runner.lmp, "close", lambda: closes.append(1))
+    registered[0]()
+    assert closes == []
+
+
+def test_shutdown_hook_swallows_errors(fake_pylammpsmpi, tmp_path, monkeypatch):
+    import calphy.library_runner as lr
+
+    registered = []
+    monkeypatch.setattr(lr, "_register_atexit", registered.append)
+    runner = make_runner(tmp_path)
+
+    def boom():
+        raise RuntimeError("worker already dead")
+
+    monkeypatch.setattr(runner.lmp, "close", boom)
+    registered[0]()  # must not raise at interpreter shutdown
+
+
+def test_construction_without_register_atexit(fake_pylammpsmpi, tmp_path, monkeypatch):
+    """A CPython without threading._register_atexit must still construct."""
+    import calphy.library_runner as lr
+
+    monkeypatch.setattr(lr, "_register_atexit", None)
+    runner = make_runner(tmp_path)
+    runner.close()
+    assert runner.lmp.closed
