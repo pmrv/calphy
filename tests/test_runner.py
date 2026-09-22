@@ -633,3 +633,52 @@ def test_imports_without_pylammpsmpi():
                           text=True, cwd=REPO_ROOT)
     assert proc.returncode == 0, proc.stdout + proc.stderr
     assert "OK" in proc.stdout
+
+
+# --------------------------------------------------------------------------- #
+# BaseRunner as a context manager (issue #7)
+# --------------------------------------------------------------------------- #
+class _RecordingRunner(R.BaseRunner):
+    """Minimal BaseRunner subclass that records close() calls."""
+
+    def __init__(self, directory=".", close_error=None):
+        super().__init__(directory)
+        self.closes = 0
+        self.close_error = close_error
+
+    def close(self):
+        self.closes += 1
+        if self.close_error is not None:
+            raise self.close_error
+
+
+def test_context_manager_yields_the_runner_and_closes():
+    runner = _RecordingRunner()
+    with runner as lmp:
+        assert lmp is runner
+        assert runner.closes == 0
+    assert runner.closes == 1
+
+
+def test_context_manager_closes_on_exception_and_does_not_suppress():
+    runner = _RecordingRunner()
+    with pytest.raises(ValueError, match="physics"):
+        with runner:
+            raise ValueError("physics went wrong")
+    assert runner.closes == 1
+
+
+def test_close_failure_propagates_when_no_exception_is_in_flight():
+    runner = _RecordingRunner(close_error=RuntimeError("close failed"))
+    with pytest.raises(RuntimeError, match="close failed"):
+        with runner:
+            pass
+
+
+def test_close_failure_does_not_mask_the_original_exception():
+    """A dead LAMMPS worker can make close() fail; the physics error must win."""
+    runner = _RecordingRunner(close_error=RuntimeError("worker already dead"))
+    with pytest.raises(ValueError, match="physics"):
+        with runner:
+            raise ValueError("physics went wrong")
+    assert runner.closes == 1

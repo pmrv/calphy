@@ -162,61 +162,60 @@ class Liquid(cph.Phase):
         At the end of the run, the averaged box dimensions are calculated.
         """
         # create lammps object
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # set up structure
-        lmp = ph.create_structure(lmp, self.calc)
+            # set up structure
+            lmp = ph.create_structure(lmp, self.calc)
 
-        # set up potential
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            # set up potential
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # Melt regime for the liquid
-        lmp.command(
-            "velocity all create %f %d"
-            % (self.calc._temperature_high, np.random.randint(1, 10000))
-        )
+            # Melt regime for the liquid
+            lmp.command(
+                "velocity all create %f %d"
+                % (self.calc._temperature_high, np.random.randint(1, 10000))
+            )
 
-        # add some computes
-        lmp.command("variable         mvol equal vol")
-        lmp.command("variable         mlx equal lx")
-        lmp.command("variable         mly equal ly")
-        lmp.command("variable         mlz equal lz")
-        lmp.command("variable         mpress equal press")
-        lmp.command("variable         mpe equal pe/atoms")
-        lmp.command("variable         metotal equal etotal/atoms")
-        lmp.command("variable         mtemp equal temp")
+            # add some computes
+            lmp.command("variable         mvol equal vol")
+            lmp.command("variable         mlx equal lx")
+            lmp.command("variable         mly equal ly")
+            lmp.command("variable         mlz equal lz")
+            lmp.command("variable         mpress equal press")
+            lmp.command("variable         mpe equal pe/atoms")
+            lmp.command("variable         metotal equal etotal/atoms")
+            lmp.command("variable         mtemp equal temp")
 
-        # Disorder the structure before equilibration
-        if self.calc.melting_cycle:
-            self.melt_structure(lmp)
-        else:
-            self.rattle_structure(lmp)
+            # Disorder the structure before equilibration
+            if self.calc.melting_cycle:
+                self.melt_structure(lmp)
+            else:
+                self.rattle_structure(lmp)
 
-        if not self.calc._fix_lattice:
-            # now assign correct temperature and equilibrate
-            self.run_zero_pressure_equilibration(lmp)
+            if not self.calc._fix_lattice:
+                # now assign correct temperature and equilibrate
+                self.run_zero_pressure_equilibration(lmp)
 
-            # equilibration-frame dump (post warm-up; no-op unless
-            # n_print_steps_equilibration > 0)
-            self.start_equilibration_dump(lmp)
+                # equilibration-frame dump (post warm-up; no-op unless
+                # n_print_steps_equilibration > 0)
+                self.start_equilibration_dump(lmp)
 
-            # converge pressure
-            self.run_pressure_convergence(lmp)
-        else:
-            self.start_equilibration_dump(lmp)
-            self.run_constrained_pressure_convergence(lmp)
+                # converge pressure
+                self.run_pressure_convergence(lmp)
+            else:
+                self.start_equilibration_dump(lmp)
+                self.run_constrained_pressure_convergence(lmp)
 
-        # check melted error
-        self.stop_equilibration_dump(lmp)
-        self.dump_current_snapshot(lmp, "traj.equilibration_stage1.dat")
-        self.check_if_solidfied(lmp, "traj.equilibration_stage1.dat")
-        self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
-        lmp = ph.write_data(lmp, "conf.equilibration.data")
+            # check melted error
+            self.stop_equilibration_dump(lmp)
+            self.dump_current_snapshot(lmp, "traj.equilibration_stage1.dat")
+            self.check_if_solidfied(lmp, "traj.equilibration_stage1.dat")
+            self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
+            lmp = ph.write_data(lmp, "conf.equilibration.data")
 
-        self.lammps_close(lmp=lmp)
         lmp.rotate_logs("averaging")
 
     def run_integration(self, iteration=1):
@@ -237,242 +236,240 @@ class Liquid(cph.Phase):
         Run the integration routine where the initial and final systems are connected using
         the lambda parameter. See algorithm 4 in publication.
         """
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        # Adiabatic switching parameters.
-        lmp.command("variable        li       equal   1.0")
-        lmp.command("variable        lf       equal   0.0")
+            # Adiabatic switching parameters.
+            lmp.command("variable        li       equal   1.0")
+            lmp.command("variable        lf       equal   0.0")
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # read in the conf file: the equilibrated configuration, or for later
-        # iterations the end of the previous backward leg (see
-        # _integration_start_configuration)
-        conf = self._integration_start_configuration(iteration)
-        lmp = ph.read_data(lmp, conf)
+            # read in the conf file: the equilibrated configuration, or for later
+            # iterations the end of the previous backward leg (see
+            # _integration_start_configuration)
+            conf = self._integration_start_configuration(iteration)
+            lmp = ph.read_data(lmp, conf)
 
-        # set hybrid ufm and normal potential
-        # lmp = ph.set_hybrid_potential(lmp, self.options, self.eps)
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            # set hybrid ufm and normal potential
+            # lmp = ph.set_hybrid_potential(lmp, self.options, self.eps)
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # remap the box to get the correct pressure
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            # remap the box to get the correct pressure
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        lmp.command("fix              f1 all nve")
-        lmp.command(
-            "fix              f2 all langevin %f %f %f %d zero yes"
-            % (
-                self.calc._temperature,
-                self.calc._temperature,
-                self.calc.md.thermostat_damping[1],
-                np.random.randint(1, 10000),
+            lmp.command("fix              f1 all nve")
+            lmp.command(
+                "fix              f2 all langevin %f %f %f %d zero yes"
+                % (
+                    self.calc._temperature,
+                    self.calc._temperature,
+                    self.calc.md.thermostat_damping[1],
+                    np.random.randint(1, 10000),
+                )
             )
-        )
-        # Warm start only: the configuration is already an equilibrium sample
-        # and the velocities are regenerated before the forward leg.
-        n_warm = self._warm_start_steps(npt=False)
-        self.logger.info(
-            "integration iteration %d: warm start of %d steps "
-            "(n_equilibration_steps = %d)",
-            iteration, n_warm, self.calc.n_equilibration_steps,
-        )
-        lmp.command("run               %d" % n_warm)
-
-        lmp.command("unfix            f1")
-        lmp.command("unfix            f2")
-
-        # Output file naming. For the original single-leg path the files are
-        # forward_%d.dat / backward_%d.dat (unchanged). For the two-leg path this
-        # first leg (real -> multi-component UFM) writes *_leg1_%d.dat and the
-        # second leg (multi-component UFM -> single-component UFM) writes
-        # *_leg2_%d.dat.
-        leg1_fwd = "forward_leg1_%d.dat" if self._is_two_leg else "forward_%d.dat"
-        leg1_bkd = "backward_leg1_%d.dat" if self._is_two_leg else "backward_%d.dat"
-
-        # ---------------------------------------------------------------
-        # FWD cycle
-        # ---------------------------------------------------------------
-
-        lmp.command("variable         flambda equal ramp(${li},${lf})")
-        lmp.command("variable         blambda equal 1.0-v_flambda")
-
-        lmp.command(
-            ph.scaled_pair_style_command(
-                self.calc,
-                ["v_flambda"],
-                extra_terms=["v_blambda ufm %f" % self.ufm_cutoff],
+            # Warm start only: the configuration is already an equilibrium sample
+            # and the velocities are regenerated before the forward leg.
+            n_warm = self._warm_start_steps(npt=False)
+            self.logger.info(
+                "integration iteration %d: warm start of %d steps "
+                "(n_equilibration_steps = %d)",
+                iteration, n_warm, self.calc.n_equilibration_steps,
             )
-        )
+            lmp.command("run               %d" % n_warm)
 
-        for command in ph.hybrid_pair_coeff_commands(self.calc):
-            lmp.command(command)
-        for command in self.ufm_pair_coeff_commands(
-            self.eps,
-            self.calc.uhlenbeck_ford_model.sigma,
-            self._ufm_sigma_by_type,
-            substyle="ufm",
-        ):
-            lmp.command(command)
+            lmp.command("unfix            f1")
+            lmp.command("unfix            f2")
 
-        compute_commands, real_energy, compute_ids = ph.real_pair_compute_commands(
-            self.calc
-        )
-        for command in compute_commands:
-            lmp.command(command)
-        lmp.command("compute          c2 all pair ufm")
+            # Output file naming. For the original single-leg path the files are
+            # forward_%d.dat / backward_%d.dat (unchanged). For the two-leg path this
+            # first leg (real -> multi-component UFM) writes *_leg1_%d.dat and the
+            # second leg (multi-component UFM -> single-component UFM) writes
+            # *_leg2_%d.dat.
+            leg1_fwd = "forward_leg1_%d.dat" if self._is_two_leg else "forward_%d.dat"
+            leg1_bkd = "backward_leg1_%d.dat" if self._is_two_leg else "backward_%d.dat"
 
-        lmp.command("variable         step equal step")
-        lmp.command("variable         dU1 equal (%s)/atoms" % real_energy)
-        lmp.command("variable         dU2 equal c_c2/atoms")
+            # ---------------------------------------------------------------
+            # FWD cycle
+            # ---------------------------------------------------------------
 
-        lmp.command("thermo_style     custom step v_dU1 v_dU2")
-        lmp.command("thermo           1000")
+            lmp.command("variable         flambda equal ramp(${li},${lf})")
+            lmp.command("variable         blambda equal 1.0-v_flambda")
 
-        lmp.command(
-            "velocity         all create %f %d mom yes rot yes dist gaussian"
-            % (self.calc._temperature, np.random.randint(1, 10000))
-        )
-
-        lmp.command("fix              f1 all nve")
-        lmp.command(
-            "fix              f2 all langevin %f %f %f %d zero yes"
-            % (
-                self.calc._temperature,
-                self.calc._temperature,
-                self.calc.md.thermostat_damping[1],
-                np.random.randint(1, 10000),
+            lmp.command(
+                ph.scaled_pair_style_command(
+                    self.calc,
+                    ["v_flambda"],
+                    extra_terms=["v_blambda ufm %f" % self.ufm_cutoff],
+                )
             )
-        )
-        lmp.command("compute          Tcm all temp/com")
-        lmp.command("fix_modify       f2 temp Tcm")
 
-        lmp.command(
-            'fix              f3 all print 1 "${dU1} ${dU2} ${flambda}" '
-            'title "# dU_sys[eV/atom] dU_ref[eV/atom] lambda" '
-            "screen no file %s"
-            % (leg1_fwd % iteration)
-        )
-        lmp.command("run               %d" % self.calc._n_switching_steps)
+            for command in ph.hybrid_pair_coeff_commands(self.calc):
+                lmp.command(command)
+            for command in self.ufm_pair_coeff_commands(
+                self.eps,
+                self.calc.uhlenbeck_ford_model.sigma,
+                self._ufm_sigma_by_type,
+                substyle="ufm",
+            ):
+                lmp.command(command)
 
-        lmp.command("unfix            f1")
-        lmp.command("unfix            f2")
-        lmp.command("unfix            f3")
-        for compute_id in compute_ids:
-            lmp.command("uncompute        %s" % compute_id)
-        lmp.command("uncompute        c2")
-
-        # ---------------------------------------------------------------
-        # EQBRM cycle
-        # ---------------------------------------------------------------
-
-        lmp.command("pair_style       ufm %f" % self.ufm_cutoff)
-        for command in self.ufm_pair_coeff_commands(
-            self.eps,
-            self.calc.uhlenbeck_ford_model.sigma,
-            self._ufm_sigma_by_type,
-            substyle="",
-        ):
-            lmp.command(command)
-
-        lmp.command("thermo_style     custom step pe")
-        lmp.command("thermo           1000")
-
-        lmp.command("fix              f1 all nve")
-        lmp.command(
-            "fix              f2 all langevin %f %f %f %d zero yes"
-            % (
-                self.calc._temperature,
-                self.calc._temperature,
-                self.calc.md.thermostat_damping[1],
-                np.random.randint(1, 10000),
+            compute_commands, real_energy, compute_ids = ph.real_pair_compute_commands(
+                self.calc
             )
-        )
-        lmp.command("fix_modify       f2 temp Tcm")
+            for command in compute_commands:
+                lmp.command(command)
+            lmp.command("compute          c2 all pair ufm")
 
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("variable         step equal step")
+            lmp.command("variable         dU1 equal (%s)/atoms" % real_energy)
+            lmp.command("variable         dU2 equal c_c2/atoms")
 
-        lmp.command("unfix            f1")
-        lmp.command("unfix            f2")
+            lmp.command("thermo_style     custom step v_dU1 v_dU2")
+            lmp.command("thermo           1000")
 
-        # ---------------------------------------------------------------
-        # BKD cycle
-        # ---------------------------------------------------------------
-
-        lmp.command("variable         flambda equal ramp(${lf},${li})")
-        lmp.command("variable         blambda equal 1.0-v_flambda")
-
-        lmp.command(
-            ph.scaled_pair_style_command(
-                self.calc,
-                ["v_flambda"],
-                extra_terms=["v_blambda ufm %f" % self.ufm_cutoff],
+            lmp.command(
+                "velocity         all create %f %d mom yes rot yes dist gaussian"
+                % (self.calc._temperature, np.random.randint(1, 10000))
             )
-        )
 
-        for command in ph.hybrid_pair_coeff_commands(self.calc):
-            lmp.command(command)
-        for command in self.ufm_pair_coeff_commands(
-            self.eps,
-            self.calc.uhlenbeck_ford_model.sigma,
-            self._ufm_sigma_by_type,
-            substyle="ufm",
-        ):
-            lmp.command(command)
-
-        compute_commands, real_energy, compute_ids = ph.real_pair_compute_commands(
-            self.calc
-        )
-        for command in compute_commands:
-            lmp.command(command)
-        lmp.command("compute          c2 all pair ufm")
-
-        lmp.command("variable         step equal step")
-        lmp.command("variable         dU1 equal (%s)/atoms" % real_energy)
-        lmp.command("variable         dU2 equal c_c2/atoms")
-
-        lmp.command("thermo_style     custom step v_dU1 v_dU2")
-        lmp.command("thermo           1000")
-
-        lmp.command("fix              f1 all nve")
-        lmp.command(
-            "fix              f2 all langevin %f %f %f %d zero yes"
-            % (
-                self.calc._temperature,
-                self.calc._temperature,
-                self.calc.md.thermostat_damping[1],
-                np.random.randint(1, 10000),
+            lmp.command("fix              f1 all nve")
+            lmp.command(
+                "fix              f2 all langevin %f %f %f %d zero yes"
+                % (
+                    self.calc._temperature,
+                    self.calc._temperature,
+                    self.calc.md.thermostat_damping[1],
+                    np.random.randint(1, 10000),
+                )
             )
-        )
-        lmp.command("fix_modify       f2 temp Tcm")
+            lmp.command("compute          Tcm all temp/com")
+            lmp.command("fix_modify       f2 temp Tcm")
 
-        lmp.command(
-            'fix              f3 all print 1 "${dU1} ${dU2} ${flambda}" '
-            'title "# dU_sys[eV/atom] dU_ref[eV/atom] lambda" '
-            "screen no file %s"
-            % (leg1_bkd % iteration)
-        )
-        lmp.command("run               %d" % self.calc._n_switching_steps)
+            lmp.command(
+                'fix              f3 all print 1 "${dU1} ${dU2} ${flambda}" '
+                'title "# dU_sys[eV/atom] dU_ref[eV/atom] lambda" '
+                "screen no file %s"
+                % (leg1_fwd % iteration)
+            )
+            lmp.command("run               %d" % self.calc._n_switching_steps)
 
-        lmp.command("unfix            f1")
-        lmp.command("unfix            f2")
-        lmp.command("unfix            f3")
-        for compute_id in compute_ids:
-            lmp.command("uncompute        %s" % compute_id)
-        lmp.command("uncompute        c2")
+            lmp.command("unfix            f1")
+            lmp.command("unfix            f2")
+            lmp.command("unfix            f3")
+            for compute_id in compute_ids:
+                lmp.command("uncompute        %s" % compute_id)
+            lmp.command("uncompute        c2")
 
-        # Back on the real potential at T: starting point of the next
-        # iteration.  Written before leg 2, which ends in a UFM state.
-        lmp = ph.write_data(lmp, "conf.fe.backward_%d.data" % iteration)
+            # ---------------------------------------------------------------
+            # EQBRM cycle
+            # ---------------------------------------------------------------
 
-        # ---------------------------------------------------------------
-        # LEG 2 (two-leg path only): multi-component UFM -> single-component UFM
-        # ---------------------------------------------------------------
-        if self._is_two_leg:
-            self._run_leg2(lmp, iteration)
+            lmp.command("pair_style       ufm %f" % self.ufm_cutoff)
+            for command in self.ufm_pair_coeff_commands(
+                self.eps,
+                self.calc.uhlenbeck_ford_model.sigma,
+                self._ufm_sigma_by_type,
+                substyle="",
+            ):
+                lmp.command(command)
 
-        # close object
-        self.lammps_close(lmp=lmp)
+            lmp.command("thermo_style     custom step pe")
+            lmp.command("thermo           1000")
+
+            lmp.command("fix              f1 all nve")
+            lmp.command(
+                "fix              f2 all langevin %f %f %f %d zero yes"
+                % (
+                    self.calc._temperature,
+                    self.calc._temperature,
+                    self.calc.md.thermostat_damping[1],
+                    np.random.randint(1, 10000),
+                )
+            )
+            lmp.command("fix_modify       f2 temp Tcm")
+
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+
+            lmp.command("unfix            f1")
+            lmp.command("unfix            f2")
+
+            # ---------------------------------------------------------------
+            # BKD cycle
+            # ---------------------------------------------------------------
+
+            lmp.command("variable         flambda equal ramp(${lf},${li})")
+            lmp.command("variable         blambda equal 1.0-v_flambda")
+
+            lmp.command(
+                ph.scaled_pair_style_command(
+                    self.calc,
+                    ["v_flambda"],
+                    extra_terms=["v_blambda ufm %f" % self.ufm_cutoff],
+                )
+            )
+
+            for command in ph.hybrid_pair_coeff_commands(self.calc):
+                lmp.command(command)
+            for command in self.ufm_pair_coeff_commands(
+                self.eps,
+                self.calc.uhlenbeck_ford_model.sigma,
+                self._ufm_sigma_by_type,
+                substyle="ufm",
+            ):
+                lmp.command(command)
+
+            compute_commands, real_energy, compute_ids = ph.real_pair_compute_commands(
+                self.calc
+            )
+            for command in compute_commands:
+                lmp.command(command)
+            lmp.command("compute          c2 all pair ufm")
+
+            lmp.command("variable         step equal step")
+            lmp.command("variable         dU1 equal (%s)/atoms" % real_energy)
+            lmp.command("variable         dU2 equal c_c2/atoms")
+
+            lmp.command("thermo_style     custom step v_dU1 v_dU2")
+            lmp.command("thermo           1000")
+
+            lmp.command("fix              f1 all nve")
+            lmp.command(
+                "fix              f2 all langevin %f %f %f %d zero yes"
+                % (
+                    self.calc._temperature,
+                    self.calc._temperature,
+                    self.calc.md.thermostat_damping[1],
+                    np.random.randint(1, 10000),
+                )
+            )
+            lmp.command("fix_modify       f2 temp Tcm")
+
+            lmp.command(
+                'fix              f3 all print 1 "${dU1} ${dU2} ${flambda}" '
+                'title "# dU_sys[eV/atom] dU_ref[eV/atom] lambda" '
+                "screen no file %s"
+                % (leg1_bkd % iteration)
+            )
+            lmp.command("run               %d" % self.calc._n_switching_steps)
+
+            lmp.command("unfix            f1")
+            lmp.command("unfix            f2")
+            lmp.command("unfix            f3")
+            for compute_id in compute_ids:
+                lmp.command("uncompute        %s" % compute_id)
+            lmp.command("uncompute        c2")
+
+            # Back on the real potential at T: starting point of the next
+            # iteration.  Written before leg 2, which ends in a UFM state.
+            lmp = ph.write_data(lmp, "conf.fe.backward_%d.data" % iteration)
+
+            # ---------------------------------------------------------------
+            # LEG 2 (two-leg path only): multi-component UFM -> single-component UFM
+            # ---------------------------------------------------------------
+            if self._is_two_leg:
+                self._run_leg2(lmp, iteration)
+
         lmp.rotate_logs("integration")
 
     def _run_leg2(self, lmp, iteration):

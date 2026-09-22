@@ -1463,199 +1463,198 @@ class Phase:
             iteration, t0, tf, li, lf, pi, pf,
         )
 
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp.command("echo              log")
-        lmp.command("variable          li equal %f" % li)
-        lmp.command("variable          lf equal %f" % lf)
+            lmp.command("echo              log")
+            lmp.command("variable          li equal %f" % li)
+            lmp.command("variable          lf equal %f" % lf)
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        lmp = ph.read_data(lmp, conf)
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            lmp = ph.read_data(lmp, conf)
 
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # ── Initial equilibration ──────────────────────────────────────────
-        if self.calc.npt:
-            lmp.command(
-                "fix               f1 all npt temp %f %f %f %s %f %f %f"
-                % (t0, t0, self.calc.md.thermostat_damping[1],
-                   self.iso, pi, pi, self.calc.md.barostat_damping[1])
-            )
-        else:
-            lmp.command(
-                "fix               f1 all nvt temp %f %f %f"
-                % (t0, t0, self.calc.md.thermostat_damping[1])
-            )
-
-        n_warm = self._warm_start_steps(npt=self.calc.npt)
-        self.logger.info(
-            "forward sweep (iteration %d): warm start of %d steps "
-            "(configuration already equilibrated; velocities are regenerated "
-            "for the COM-constrained equilibration that follows)",
-            iteration, n_warm,
-        )
-        lmp.command("run               %d" % n_warm)
-        self.logger.info("forward sweep (iteration %d): warm start done", iteration)
-
-        lmp.command("unfix             f1")
-
-        # ── COM-constrained equilibration ──────────────────────────────────
-        lmp.command("variable         xcm equal xcm(all,x)")
-        lmp.command("variable         ycm equal xcm(all,y)")
-        lmp.command("variable         zcm equal xcm(all,z)")
-
-        if self.calc.npt:
-            lmp.command(
-                "fix               f1 all npt temp %f %f %f %s %f %f %f "
-                "fixedpoint ${xcm} ${ycm} ${zcm}"
-                % (t0, t0, self.calc.md.thermostat_damping[1],
-                   self.iso, pi, pi, self.calc.md.barostat_damping[1])
-            )
-        else:
-            lmp.command(
-                "fix               f1 all nvt temp %f %f %f "
-                "fixedpoint ${xcm} ${ycm} ${zcm}"
-                % (t0, t0, self.calc.md.thermostat_damping[1])
-            )
-
-        lmp.command("compute           tcm all temp/com")
-        lmp.command("fix_modify        f1 temp tcm")
-        lmp.command("variable          step    equal step")
-        lmp.command("variable          dU      equal c_thermo_pe/atoms")
-        lmp.command("thermo_style      custom step pe c_tcm press vol")
-        lmp.command("thermo            10000")
-
-        lmp.command(
-            "velocity          all create %f %d mom yes rot yes dist gaussian"
-            % (t0, np.random.randint(1, 10000))
-        )
-        self.logger.info(
-            "forward sweep (iteration %d): COM-constrained equilibration start", iteration
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        self.logger.info(
-            "forward sweep (iteration %d): COM-constrained equilibration done", iteration
-        )
-
-        # ----------------------------------------------------------------
-        # Lambda schedule for the forward sweep.
-        #
-        # "linear" (default): lambda = ramp(li, lf) — simple linear
-        #   interpolation; LAMMPS ramp() resets automatically each run.
-        #
-        # "uniform_temperature": T_eq(s) = T0/lambda is linear in step
-        #   so every Kelvin bin gets the same number of MD samples.
-        #   Requires explicit step0 capture before each sweep.
-        # ----------------------------------------------------------------
-        lmp.command("variable         T0_rs equal %f" % t0)
-        if self.calc.lambda_schedule == "uniform_temperature":
-            lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
-            lmp.command("variable         Tf_rs equal %f" % tf)
-            # Capture the step at the START of the sweep so the formula is
-            # independent of any prior MD steps (no reset_timestep needed).
-            lmp.command("variable         step0 equal $(step)")
-            lmp.command(
-                "variable         flambda equal "
-                "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-            lmp.command(
-                "variable         blambda equal "
-                "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-        else:  # "linear" (default)
-            lmp.command("variable         flambda equal ramp(${li},${lf})")
-            lmp.command("variable         blambda equal ramp(${lf},${li})")
-        lmp.command("variable         ftemp equal v_T0_rs/v_flambda")
-        lmp.command("variable         btemp equal v_T0_rs/v_blambda")
-
-        # Scaled Hamiltonian lambda*U from a single copy of the potential.
-        # The earlier two-copy form, 1*U + (lambda-1)*U, gives the identical
-        # energy and pressure but evaluates the potential twice per step.
-        lmp.command(ph.scaled_pair_style_command(self.calc, ["v_flambda"]))
-        for cmd in ph.hybrid_pair_coeff_commands(self.calc):
-            lmp.command(cmd)
-
-        # ── Optional MC swaps ───────────────────────────────────────────────
-        if (
-            self.calc.monte_carlo.n_swaps > 0
-            and len(self.calc.monte_carlo.forward_swap_types) >= 2
-        ):
-            swap_types  = self.calc.monte_carlo.forward_swap_types
-            swap_combos = list(itertools.combinations(swap_types, 2))
-            self.logger.info(
-                "forward sweep (iteration %d): %d swap moves/combo, "
-                "%d combinations every %d steps",
-                iteration, self.calc.monte_carlo.n_swaps,
-                len(swap_combos), self.calc.monte_carlo.n_steps,
-            )
-            for combo in swap_combos:
-                self.logger.info("  swapping types %s ↔ %s", combo[0], combo[1])
-            for idx, (type1, type2) in enumerate(swap_combos):
+            # ── Initial equilibration ──────────────────────────────────────────
+            if self.calc.npt:
                 lmp.command(
-                    "fix  swap%d all atom/swap %d %d %d ${ftemp} ke yes types %s %s"
-                    % (idx, self.calc.monte_carlo.n_steps,
-                       self.calc.monte_carlo.n_swaps,
-                       np.random.randint(1, 10000), type1, type2)
+                    "fix               f1 all npt temp %f %f %f %s %f %f %f"
+                    % (t0, t0, self.calc.md.thermostat_damping[1],
+                       self.iso, pi, pi, self.calc.md.barostat_damping[1])
+                )
+            else:
+                lmp.command(
+                    "fix               f1 all nvt temp %f %f %f"
+                    % (t0, t0, self.calc.md.thermostat_damping[1])
                 )
 
-        if self.calc.n_print_steps > 0:
+            n_warm = self._warm_start_steps(npt=self.calc.npt)
+            self.logger.info(
+                "forward sweep (iteration %d): warm start of %d steps "
+                "(configuration already equilibrated; velocities are regenerated "
+                "for the COM-constrained equilibration that follows)",
+                iteration, n_warm,
+            )
+            lmp.command("run               %d" % n_warm)
+            self.logger.info("forward sweep (iteration %d): warm start done", iteration)
+
+            lmp.command("unfix             f1")
+
+            # ── COM-constrained equilibration ──────────────────────────────────
+            lmp.command("variable         xcm equal xcm(all,x)")
+            lmp.command("variable         ycm equal xcm(all,y)")
+            lmp.command("variable         zcm equal xcm(all,z)")
+
+            if self.calc.npt:
+                lmp.command(
+                    "fix               f1 all npt temp %f %f %f %s %f %f %f "
+                    "fixedpoint ${xcm} ${ycm} ${zcm}"
+                    % (t0, t0, self.calc.md.thermostat_damping[1],
+                       self.iso, pi, pi, self.calc.md.barostat_damping[1])
+                )
+            else:
+                lmp.command(
+                    "fix               f1 all nvt temp %f %f %f "
+                    "fixedpoint ${xcm} ${ycm} ${zcm}"
+                    % (t0, t0, self.calc.md.thermostat_damping[1])
+                )
+
+            lmp.command("compute           tcm all temp/com")
+            lmp.command("fix_modify        f1 temp tcm")
+            lmp.command("variable          step    equal step")
+            lmp.command("variable          dU      equal c_thermo_pe/atoms")
+            lmp.command("thermo_style      custom step pe c_tcm press vol")
+            lmp.command("thermo            10000")
+
             lmp.command(
-                "dump              d1 all custom %d traj.ts.forward_%d.dat "
-                "id type mass x y z vx vy vz"
-                % (self.calc.n_print_steps, iteration)
+                "velocity          all create %f %d mom yes rot yes dist gaussian"
+                % (t0, np.random.randint(1, 10000))
+            )
+            self.logger.info(
+                "forward sweep (iteration %d): COM-constrained equilibration start", iteration
+            )
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            self.logger.info(
+                "forward sweep (iteration %d): COM-constrained equilibration done", iteration
             )
 
-        # ── Forward sweep ───────────────────────────────────────────────────
-        self.logger.info("forward sweep (iteration %d): sweep start", iteration)
-        try:
-            self._run_sweep(
-                lmp=lmp,
-                lambda_var="flambda",
-                output_file_pattern="ts.forward_%d.dat" % iteration,
-                sweep_label="forward (iteration %d)" % iteration,
-            )
-        except Exception:
-            # Close the runner and rotate the log before the exception
-            # propagates, so the backward sweep can start from a clean state.
-            try:
-                self.lammps_close(lmp=lmp)
-            except Exception as _close_exc:
-                self.logger.debug(
-                    "forward sweep cleanup: lammps_close failed: %s", _close_exc
+            # ----------------------------------------------------------------
+            # Lambda schedule for the forward sweep.
+            #
+            # "linear" (default): lambda = ramp(li, lf) — simple linear
+            #   interpolation; LAMMPS ramp() resets automatically each run.
+            #
+            # "uniform_temperature": T_eq(s) = T0/lambda is linear in step
+            #   so every Kelvin bin gets the same number of MD samples.
+            #   Requires explicit step0 capture before each sweep.
+            # ----------------------------------------------------------------
+            lmp.command("variable         T0_rs equal %f" % t0)
+            if self.calc.lambda_schedule == "uniform_temperature":
+                lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
+                lmp.command("variable         Tf_rs equal %f" % tf)
+                # Capture the step at the START of the sweep so the formula is
+                # independent of any prior MD steps (no reset_timestep needed).
+                lmp.command("variable         step0 equal $(step)")
+                lmp.command(
+                    "variable         flambda equal "
+                    "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
                 )
+                lmp.command(
+                    "variable         blambda equal "
+                    "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
+                )
+            else:  # "linear" (default)
+                lmp.command("variable         flambda equal ramp(${li},${lf})")
+                lmp.command("variable         blambda equal ramp(${lf},${li})")
+            lmp.command("variable         ftemp equal v_T0_rs/v_flambda")
+            lmp.command("variable         btemp equal v_T0_rs/v_blambda")
+
+            # Scaled Hamiltonian lambda*U from a single copy of the potential.
+            # The earlier two-copy form, 1*U + (lambda-1)*U, gives the identical
+            # energy and pressure but evaluates the potential twice per step.
+            lmp.command(ph.scaled_pair_style_command(self.calc, ["v_flambda"]))
+            for cmd in ph.hybrid_pair_coeff_commands(self.calc):
+                lmp.command(cmd)
+
+            # ── Optional MC swaps ───────────────────────────────────────────────
+            if (
+                self.calc.monte_carlo.n_swaps > 0
+                and len(self.calc.monte_carlo.forward_swap_types) >= 2
+            ):
+                swap_types  = self.calc.monte_carlo.forward_swap_types
+                swap_combos = list(itertools.combinations(swap_types, 2))
+                self.logger.info(
+                    "forward sweep (iteration %d): %d swap moves/combo, "
+                    "%d combinations every %d steps",
+                    iteration, self.calc.monte_carlo.n_swaps,
+                    len(swap_combos), self.calc.monte_carlo.n_steps,
+                )
+                for combo in swap_combos:
+                    self.logger.info("  swapping types %s ↔ %s", combo[0], combo[1])
+                for idx, (type1, type2) in enumerate(swap_combos):
+                    lmp.command(
+                        "fix  swap%d all atom/swap %d %d %d ${ftemp} ke yes types %s %s"
+                        % (idx, self.calc.monte_carlo.n_steps,
+                           self.calc.monte_carlo.n_swaps,
+                           np.random.randint(1, 10000), type1, type2)
+                    )
+
+            if self.calc.n_print_steps > 0:
+                lmp.command(
+                    "dump              d1 all custom %d traj.ts.forward_%d.dat "
+                    "id type mass x y z vx vy vz"
+                    % (self.calc.n_print_steps, iteration)
+                )
+
+            # ── Forward sweep ───────────────────────────────────────────────────
+            self.logger.info("forward sweep (iteration %d): sweep start", iteration)
             try:
-                lmp.rotate_logs("reversible_scaling_forward")
+                self._run_sweep(
+                    lmp=lmp,
+                    lambda_var="flambda",
+                    output_file_pattern="ts.forward_%d.dat" % iteration,
+                    sweep_label="forward (iteration %d)" % iteration,
+                )
             except Exception:
-                pass
-            raise
-        self.logger.info("forward sweep (iteration %d): sweep done", iteration)
+                # Close the runner and rotate the log before the exception
+                # propagates, so the backward sweep can start from a clean state.
+                try:
+                    self.lammps_close(lmp=lmp)
+                except Exception as _close_exc:
+                    self.logger.debug(
+                        "forward sweep cleanup: lammps_close failed: %s", _close_exc
+                    )
+                try:
+                    lmp.rotate_logs("reversible_scaling_forward")
+                except Exception:
+                    pass
+                raise
+            self.logger.info("forward sweep (iteration %d): sweep done", iteration)
 
-        # ── Cleanup swaps / dump ────────────────────────────────────────────
-        if self.calc.monte_carlo.n_swaps > 0:
-            swap_types  = self.calc.monte_carlo.forward_swap_types
-            swap_combos = list(itertools.combinations(swap_types, 2))
-            for idx in range(len(swap_combos)):
-                lmp.command("unfix swap%d" % idx)
+            # ── Cleanup swaps / dump ────────────────────────────────────────────
+            if self.calc.monte_carlo.n_swaps > 0:
+                swap_types  = self.calc.monte_carlo.forward_swap_types
+                swap_combos = list(itertools.combinations(swap_types, 2))
+                for idx in range(len(swap_combos)):
+                    lmp.command("unfix swap%d" % idx)
 
-        if self.calc.n_print_steps > 0:
-            lmp.command("undump           d1")
+            if self.calc.n_print_steps > 0:
+                lmp.command("undump           d1")
 
-        # ── Save forward-sweep end configuration ────────────────────────────
-        conf_forward = os.path.join(
-            self.simfolder, "conf.ts.forward_%d.data" % iteration
-        )
-        lmp.command("write_data        %s" % conf_forward)
-        self.logger.info(
-            "forward sweep (iteration %d): configuration saved to %s",
-            iteration, os.path.basename(conf_forward),
-        )
+            # ── Save forward-sweep end configuration ────────────────────────────
+            conf_forward = os.path.join(
+                self.simfolder, "conf.ts.forward_%d.data" % iteration
+            )
+            lmp.command("write_data        %s" % conf_forward)
+            self.logger.info(
+                "forward sweep (iteration %d): configuration saved to %s",
+                iteration, os.path.basename(conf_forward),
+            )
 
-        self.lammps_close(lmp=lmp)
         lmp.rotate_logs("reversible_scaling_forward")
 
     def _reversible_scaling_backward(self, iteration: int = 1) -> None:
@@ -1686,161 +1685,160 @@ class Phase:
             iteration, tf, t0, lf, li, pf, pi,
         )
 
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp.command("echo              log")
-        lmp.command("variable          li equal %f" % li)
-        lmp.command("variable          lf equal %f" % lf)
+            lmp.command("echo              log")
+            lmp.command("variable          li equal %f" % li)
+            lmp.command("variable          lf equal %f" % lf)
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        conf = os.path.join(
-            self.simfolder, "conf.ts.forward_%d.data" % iteration
-        )
-        lmp = ph.read_data(lmp, conf)
-
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
-
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
-
-        # ── Re-install scaled potential at constant λ = lf BEFORE the
-        # middle equilibration.  The forward sweep ended with the scaled
-        # pair style active at λ = lf, so the snapshot stored in
-        # ``conf.ts.forward_<iter>.data`` is in equilibrium with that
-        # Hamiltonian (effective temperature Tf, expanded box).  If we
-        # equilibrated here under the *unscaled* potential at T0, the
-        # thermostat/barostat would re-thermalise to a much colder/denser
-        # state, and the first samples of the backward sweep would show a
-        # large transient bump in dU as the system re-expanded under the
-        # scaled potential.  Using a constant scaling variable (rather
-        # than the ramp) keeps λ frozen at lf during this run.  A single
-        # copy of the potential scaled by lambda is used throughout the
-        # reversible-scaling stage (see _reversible_scaling_forward).
-        lmp.command("variable          lambda_eq equal %f" % lf)
-        lmp.command(ph.scaled_pair_style_command(self.calc, ["v_lambda_eq"]))
-        for cmd in ph.hybrid_pair_coeff_commands(self.calc):
-            lmp.command(cmd)
-
-        lmp.command("variable         xcm equal xcm(all,x)")
-        lmp.command("variable         ycm equal xcm(all,y)")
-        lmp.command("variable         zcm equal xcm(all,z)")
-
-        if self.calc.npt:
-            lmp.command(
-                "fix               f1 all npt temp %f %f %f %s %f %f %f "
-                "fixedpoint ${xcm} ${ycm} ${zcm}"
-                % (t0, t0, self.calc.md.thermostat_damping[1],
-                   self.iso, pi, pi, self.calc.md.barostat_damping[1])
+            conf = os.path.join(
+                self.simfolder, "conf.ts.forward_%d.data" % iteration
             )
-        else:
-            lmp.command(
-                "fix               f1 all nvt temp %f %f %f "
-                "fixedpoint ${xcm} ${ycm} ${zcm}"
-                % (t0, t0, self.calc.md.thermostat_damping[1])
-            )
+            lmp = ph.read_data(lmp, conf)
 
-        lmp.command("compute           tcm all temp/com")
-        lmp.command("fix_modify        f1 temp tcm")
-        lmp.command("variable          step    equal step")
-        lmp.command("variable          dU      equal c_thermo_pe/atoms")
-        lmp.command("thermo_style      custom step pe c_tcm press vol")
-        lmp.command("thermo            10000")
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # ── Middle equilibration at effective Tf (scaled potential, λ=lf) ──
-        self.logger.info(
-            "backward sweep (iteration %d): middle equilibration start", iteration
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        self.logger.info(
-            "backward sweep (iteration %d): middle equilibration done", iteration
-        )
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # Phase-stability check at Tf
-        self.dump_current_snapshot(lmp, "traj.temp.dat")
-        if solid:
-            self.check_if_melted(lmp, "traj.temp.dat")
-        else:
-            self.check_if_solidfied(lmp, "traj.temp.dat")
+            # ── Re-install scaled potential at constant λ = lf BEFORE the
+            # middle equilibration.  The forward sweep ended with the scaled
+            # pair style active at λ = lf, so the snapshot stored in
+            # ``conf.ts.forward_<iter>.data`` is in equilibrium with that
+            # Hamiltonian (effective temperature Tf, expanded box).  If we
+            # equilibrated here under the *unscaled* potential at T0, the
+            # thermostat/barostat would re-thermalise to a much colder/denser
+            # state, and the first samples of the backward sweep would show a
+            # large transient bump in dU as the system re-expanded under the
+            # scaled potential.  Using a constant scaling variable (rather
+            # than the ramp) keeps λ frozen at lf during this run.  A single
+            # copy of the potential scaled by lambda is used throughout the
+            # reversible-scaling stage (see _reversible_scaling_forward).
+            lmp.command("variable          lambda_eq equal %f" % lf)
+            lmp.command(ph.scaled_pair_style_command(self.calc, ["v_lambda_eq"]))
+            for cmd in ph.hybrid_pair_coeff_commands(self.calc):
+                lmp.command(cmd)
 
-        # ── Switch from the constant-λ scaled potential to the ramping
-        # scaled potential for the backward sweep: define the lambda
-        # variables, then re-install hybrid/scaled driven by blambda.
-        # T0_rs is needed by both schedules for ftemp/btemp.
-        lmp.command("variable         T0_rs equal %f" % t0)
-        if self.calc.lambda_schedule == "uniform_temperature":
-            lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
-            lmp.command("variable         Tf_rs equal %f" % tf)
-            lmp.command("variable         step0 equal $(step)")
-            lmp.command(
-                "variable         flambda equal "
-                "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-            lmp.command(
-                "variable         blambda equal "
-                "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
-            )
-        else:  # "linear"
-            lmp.command("variable         flambda equal ramp(${li},${lf})")
-            lmp.command("variable         blambda equal ramp(${lf},${li})")
-        lmp.command("variable         ftemp equal v_T0_rs/v_flambda")
-        lmp.command("variable         btemp equal v_T0_rs/v_blambda")
+            lmp.command("variable         xcm equal xcm(all,x)")
+            lmp.command("variable         ycm equal xcm(all,y)")
+            lmp.command("variable         zcm equal xcm(all,z)")
 
-        lmp.command(ph.scaled_pair_style_command(self.calc, ["v_blambda"]))
-        for cmd in ph.hybrid_pair_coeff_commands(self.calc):
-            lmp.command(cmd)
-
-        # ── Optional MC swaps ───────────────────────────────────────────────
-        if (
-            self.calc.monte_carlo.n_swaps > 0
-            and len(self.calc.monte_carlo.reverse_swap_types) >= 2
-        ):
-            swap_types  = self.calc.monte_carlo.reverse_swap_types
-            swap_combos = list(itertools.combinations(swap_types, 2))
-            self.logger.info(
-                "backward sweep (iteration %d): %d swap moves/combo, "
-                "%d combinations every %d steps",
-                iteration, self.calc.monte_carlo.n_swaps,
-                len(swap_combos), self.calc.monte_carlo.n_steps,
-            )
-            for combo in swap_combos:
-                self.logger.info("  swapping types %s ↔ %s", combo[0], combo[1])
-            for idx, (type1, type2) in enumerate(swap_combos):
+            if self.calc.npt:
                 lmp.command(
-                    "fix  swap%d all atom/swap %d %d %d ${btemp} ke yes types %s %s"
-                    % (idx, self.calc.monte_carlo.n_steps,
-                       self.calc.monte_carlo.n_swaps,
-                       np.random.randint(1, 10000), type1, type2)
+                    "fix               f1 all npt temp %f %f %f %s %f %f %f "
+                    "fixedpoint ${xcm} ${ycm} ${zcm}"
+                    % (t0, t0, self.calc.md.thermostat_damping[1],
+                       self.iso, pi, pi, self.calc.md.barostat_damping[1])
+                )
+            else:
+                lmp.command(
+                    "fix               f1 all nvt temp %f %f %f "
+                    "fixedpoint ${xcm} ${ycm} ${zcm}"
+                    % (t0, t0, self.calc.md.thermostat_damping[1])
                 )
 
-        if self.calc.n_print_steps > 0:
-            lmp.command(
-                "dump              d1 all custom %d traj.ts.backward_%d.dat "
-                "id type mass x y z vx vy vz"
-                % (self.calc.n_print_steps, iteration)
+            lmp.command("compute           tcm all temp/com")
+            lmp.command("fix_modify        f1 temp tcm")
+            lmp.command("variable          step    equal step")
+            lmp.command("variable          dU      equal c_thermo_pe/atoms")
+            lmp.command("thermo_style      custom step pe c_tcm press vol")
+            lmp.command("thermo            10000")
+
+            # ── Middle equilibration at effective Tf (scaled potential, λ=lf) ──
+            self.logger.info(
+                "backward sweep (iteration %d): middle equilibration start", iteration
+            )
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            self.logger.info(
+                "backward sweep (iteration %d): middle equilibration done", iteration
             )
 
-        # ── Backward sweep ──────────────────────────────────────────────────
-        self.logger.info("backward sweep (iteration %d): sweep start", iteration)
-        self._run_sweep(
-            lmp=lmp,
-            lambda_var="blambda",
-            output_file_pattern="ts.backward_%d.dat" % iteration,
-            sweep_label="backward (iteration %d)" % iteration,
-        )
-        self.logger.info("backward sweep (iteration %d): sweep done", iteration)
+            # Phase-stability check at Tf
+            self.dump_current_snapshot(lmp, "traj.temp.dat")
+            if solid:
+                self.check_if_melted(lmp, "traj.temp.dat")
+            else:
+                self.check_if_solidfied(lmp, "traj.temp.dat")
 
-        # ── Cleanup swaps / dump ────────────────────────────────────────────
-        if self.calc.monte_carlo.n_swaps > 0:
-            swap_types  = self.calc.monte_carlo.reverse_swap_types
-            swap_combos = list(itertools.combinations(swap_types, 2))
-            for idx in range(len(swap_combos)):
-                lmp.command("unfix swap%d" % idx)
+            # ── Switch from the constant-λ scaled potential to the ramping
+            # scaled potential for the backward sweep: define the lambda
+            # variables, then re-install hybrid/scaled driven by blambda.
+            # T0_rs is needed by both schedules for ftemp/btemp.
+            lmp.command("variable         T0_rs equal %f" % t0)
+            if self.calc.lambda_schedule == "uniform_temperature":
+                lmp.command("variable         Nsweep equal %d" % self.calc._n_sweep_steps)
+                lmp.command("variable         Tf_rs equal %f" % tf)
+                lmp.command("variable         step0 equal $(step)")
+                lmp.command(
+                    "variable         flambda equal "
+                    "v_T0_rs/(v_T0_rs+(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
+                )
+                lmp.command(
+                    "variable         blambda equal "
+                    "v_T0_rs/(v_Tf_rs-(v_Tf_rs-v_T0_rs)*(step-v_step0)/v_Nsweep)"
+                )
+            else:  # "linear"
+                lmp.command("variable         flambda equal ramp(${li},${lf})")
+                lmp.command("variable         blambda equal ramp(${lf},${li})")
+            lmp.command("variable         ftemp equal v_T0_rs/v_flambda")
+            lmp.command("variable         btemp equal v_T0_rs/v_blambda")
 
-        if self.calc.n_print_steps > 0:
-            lmp.command("undump           d1")
+            lmp.command(ph.scaled_pair_style_command(self.calc, ["v_blambda"]))
+            for cmd in ph.hybrid_pair_coeff_commands(self.calc):
+                lmp.command(cmd)
 
-        self.lammps_close(lmp=lmp)
+            # ── Optional MC swaps ───────────────────────────────────────────────
+            if (
+                self.calc.monte_carlo.n_swaps > 0
+                and len(self.calc.monte_carlo.reverse_swap_types) >= 2
+            ):
+                swap_types  = self.calc.monte_carlo.reverse_swap_types
+                swap_combos = list(itertools.combinations(swap_types, 2))
+                self.logger.info(
+                    "backward sweep (iteration %d): %d swap moves/combo, "
+                    "%d combinations every %d steps",
+                    iteration, self.calc.monte_carlo.n_swaps,
+                    len(swap_combos), self.calc.monte_carlo.n_steps,
+                )
+                for combo in swap_combos:
+                    self.logger.info("  swapping types %s ↔ %s", combo[0], combo[1])
+                for idx, (type1, type2) in enumerate(swap_combos):
+                    lmp.command(
+                        "fix  swap%d all atom/swap %d %d %d ${btemp} ke yes types %s %s"
+                        % (idx, self.calc.monte_carlo.n_steps,
+                           self.calc.monte_carlo.n_swaps,
+                           np.random.randint(1, 10000), type1, type2)
+                    )
+
+            if self.calc.n_print_steps > 0:
+                lmp.command(
+                    "dump              d1 all custom %d traj.ts.backward_%d.dat "
+                    "id type mass x y z vx vy vz"
+                    % (self.calc.n_print_steps, iteration)
+                )
+
+            # ── Backward sweep ──────────────────────────────────────────────────
+            self.logger.info("backward sweep (iteration %d): sweep start", iteration)
+            self._run_sweep(
+                lmp=lmp,
+                lambda_var="blambda",
+                output_file_pattern="ts.backward_%d.dat" % iteration,
+                sweep_label="backward (iteration %d)" % iteration,
+            )
+            self.logger.info("backward sweep (iteration %d): sweep done", iteration)
+
+            # ── Cleanup swaps / dump ────────────────────────────────────────────
+            if self.calc.monte_carlo.n_swaps > 0:
+                swap_types  = self.calc.monte_carlo.reverse_swap_types
+                swap_combos = list(itertools.combinations(swap_types, 2))
+                for idx in range(len(swap_combos)):
+                    lmp.command("unfix swap%d" % idx)
+
+            if self.calc.n_print_steps > 0:
+                lmp.command("undump           d1")
+
         lmp.rotate_logs("reversible_scaling_backward")
 
     def reversible_scaling(self, iteration=1):
@@ -1974,47 +1972,46 @@ class Phase:
         )
 
         # ── Build the LAMMPS object and load the equilibrated configuration ──
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp.command("echo              log")
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp.command("echo              log")
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        lmp = ph.read_data(lmp, conf)
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            lmp = ph.read_data(lmp, conf)
 
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # ── Short equilibration at T0 ───────────────────────────────────────
-        lmp.command(
-            "fix               1 all npt temp %f %f %f %s %f %f %f"
-            % (t0, t0, self.calc.md.thermostat_damping[1],
-               self.iso, p0, p0, self.calc.md.barostat_damping[1])
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        lmp.command("unfix             1")
+            # ── Short equilibration at T0 ───────────────────────────────────────
+            lmp.command(
+                "fix               1 all npt temp %f %f %f %s %f %f %f"
+                % (t0, t0, self.calc.md.thermostat_damping[1],
+                   self.iso, p0, p0, self.calc.md.barostat_damping[1])
+            )
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("unfix             1")
 
-        # ── Real-thermostat ramp T0 -> Tf, recording every step ─────────────
-        pf = (t0 / tf) * p0
-        lmp.command("variable          dU      equal pe/atoms")
-        lmp.command(
-            "fix               f2 all npt temp %f %f %f %s %f %f %f"
-            % (t0, tf, self.calc.md.thermostat_damping[1],
-               self.iso, p0, pf, self.calc.md.barostat_damping[1])
-        )
-        scan_file = "prescan.forward.dat"
-        lmp.command(
-            'fix               fp all print 1 "${dU} $(press) $(vol) $(temp)" '
-            'title "# dU[eV/atom] press[bar] vol[A^3] temp[K]" '
-            'screen no file %s' % scan_file
-        )
-        self.logger.info("pre-scan: ramp start (%d steps)", n_scan)
-        lmp.command("run               %d" % n_scan)
-        lmp.command("unfix             fp")
-        lmp.command("unfix             f2")
+            # ── Real-thermostat ramp T0 -> Tf, recording every step ─────────────
+            pf = (t0 / tf) * p0
+            lmp.command("variable          dU      equal pe/atoms")
+            lmp.command(
+                "fix               f2 all npt temp %f %f %f %s %f %f %f"
+                % (t0, tf, self.calc.md.thermostat_damping[1],
+                   self.iso, p0, pf, self.calc.md.barostat_damping[1])
+            )
+            scan_file = "prescan.forward.dat"
+            lmp.command(
+                'fix               fp all print 1 "${dU} $(press) $(vol) $(temp)" '
+                'title "# dU[eV/atom] press[bar] vol[A^3] temp[K]" '
+                'screen no file %s' % scan_file
+            )
+            self.logger.info("pre-scan: ramp start (%d steps)", n_scan)
+            lmp.command("run               %d" % n_scan)
+            lmp.command("unfix             fp")
+            lmp.command("unfix             f2")
 
-        self.lammps_close(lmp=lmp)
         lmp.rotate_logs("prescan")
 
         # ── Analyse the ramp ────────────────────────────────────────────────
@@ -2159,133 +2156,132 @@ class Phase:
         pf = lf * p0
 
         # create lammps object
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp.command("echo              log")
-        lmp.command("variable          li equal %f" % li)
-        lmp.command("variable          lf equal %f" % lf)
+            lmp.command("echo              log")
+            lmp.command("variable          li equal %f" % li)
+            lmp.command("variable          lf equal %f" % lf)
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # read in conf
-        # conf = os.path.join(self.simfolder, "conf.dump")
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        lmp = ph.read_data(lmp, conf)
+            # read in conf
+            # conf = os.path.join(self.simfolder, "conf.dump")
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            lmp = ph.read_data(lmp, conf)
 
-        # set up potential
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            # set up potential
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # remap the box to get the correct pressure
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            # remap the box to get the correct pressure
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # equilibrate first
-        lmp.command(
-            "fix               1 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                p0,
-                p0,
-                self.calc.md.barostat_damping[1],
+            # equilibrate first
+            lmp.command(
+                "fix               1 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    p0,
+                    p0,
+                    self.calc.md.barostat_damping[1],
+                )
             )
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        lmp.command("unfix             1")
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("unfix             1")
 
-        # now scale system to final temp, thereby recording enerfy at every step
-        lmp.command("variable          step    equal step")
-        lmp.command("variable          dU      equal pe/atoms")
-        lmp.command("variable          lambda equal ramp(${li},${lf})")
+            # now scale system to final temp, thereby recording enerfy at every step
+            lmp.command("variable          step    equal step")
+            lmp.command("variable          dU      equal pe/atoms")
+            lmp.command("variable          lambda equal ramp(${li},${lf})")
 
-        lmp.command(
-            "fix               f2 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                tf,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                p0,
-                pf,
-                self.calc.md.barostat_damping[1],
+            lmp.command(
+                "fix               f2 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    tf,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    p0,
+                    pf,
+                    self.calc.md.barostat_damping[1],
+                )
             )
-        )
 
-        self.logger.info(
-            "ts-sweep tscale forward (iteration %d): T %.1f → %.1f K, "
-            "%d steps",
-            iteration, t0, tf, self.calc._n_sweep_steps,
-        )
-        self._run_sweep(
-            lmp=lmp,
-            lambda_var="lambda",
-            output_file_pattern="ts.forward_%d.dat" % iteration,
-            sweep_label="tscale forward (iteration %d)" % iteration,
-        )
-
-        lmp.command("unfix             f2")
-
-        lmp.command(
-            "fix               1 all npt temp %f %f %f %s %f %f %f"
-            % (
-                tf,
-                tf,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                pf,
-                pf,
-                self.calc.md.barostat_damping[1],
+            self.logger.info(
+                "ts-sweep tscale forward (iteration %d): T %.1f → %.1f K, "
+                "%d steps",
+                iteration, t0, tf, self.calc._n_sweep_steps,
             )
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        lmp.command("unfix             1")
-
-        # check melting or freezing
-        lmp.command(
-            "dump              2 all custom 1 traj.temp.dat id type mass x y z vx vy vz"
-        )
-        lmp.command("run               0")
-        lmp.command("undump            2")
-
-        self.dump_current_snapshot(lmp, "traj.temp.dat")
-        if solid:
-            self.check_if_melted(lmp, "traj.temp.dat")
-        else:
-            self.check_if_solidfied(lmp, "traj.temp.dat")
-
-        # start reverse loop
-        lmp.command("variable          lambda equal ramp(${lf},${li})")
-
-        lmp.command(
-            "fix               f2 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                p0,
-                pf,
-                self.calc.md.barostat_damping[1],
+            self._run_sweep(
+                lmp=lmp,
+                lambda_var="lambda",
+                output_file_pattern="ts.forward_%d.dat" % iteration,
+                sweep_label="tscale forward (iteration %d)" % iteration,
             )
-        )
 
-        self.logger.info(
-            "ts-sweep tscale backward (iteration %d): T %.1f → %.1f K, "
-            "%d steps",
-            iteration, tf, t0, self.calc._n_sweep_steps,
-        )
-        self._run_sweep(
-            lmp=lmp,
-            lambda_var="lambda",
-            output_file_pattern="ts.backward_%d.dat" % iteration,
-            sweep_label="tscale backward (iteration %d)" % iteration,
-        )
+            lmp.command("unfix             f2")
 
-        lmp.command("unfix             f2")
+            lmp.command(
+                "fix               1 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    tf,
+                    tf,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    pf,
+                    pf,
+                    self.calc.md.barostat_damping[1],
+                )
+            )
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("unfix             1")
 
-        self.lammps_close(lmp=lmp)
+            # check melting or freezing
+            lmp.command(
+                "dump              2 all custom 1 traj.temp.dat id type mass x y z vx vy vz"
+            )
+            lmp.command("run               0")
+            lmp.command("undump            2")
+
+            self.dump_current_snapshot(lmp, "traj.temp.dat")
+            if solid:
+                self.check_if_melted(lmp, "traj.temp.dat")
+            else:
+                self.check_if_solidfied(lmp, "traj.temp.dat")
+
+            # start reverse loop
+            lmp.command("variable          lambda equal ramp(${lf},${li})")
+
+            lmp.command(
+                "fix               f2 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    p0,
+                    pf,
+                    self.calc.md.barostat_damping[1],
+                )
+            )
+
+            self.logger.info(
+                "ts-sweep tscale backward (iteration %d): T %.1f → %.1f K, "
+                "%d steps",
+                iteration, tf, t0, self.calc._n_sweep_steps,
+            )
+            self._run_sweep(
+                lmp=lmp,
+                lambda_var="lambda",
+                output_file_pattern="ts.backward_%d.dat" % iteration,
+                sweep_label="tscale backward (iteration %d)" % iteration,
+            )
+
+            lmp.command("unfix             f2")
+
         lmp.rotate_logs("temperature_scaling")
 
     def pressure_scaling(self, iteration=1):
@@ -2308,114 +2304,112 @@ class Phase:
         pf = self.calc._pressure_stop
 
         # create lammps object
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        lmp.command("echo              log")
-        lmp.command("variable          li equal %f" % li)
-        lmp.command("variable          lf equal %f" % lf)
-        lmp.command("variable          p0 equal %f" % p0)
-        lmp.command("variable          pf equal %f" % pf)
+            lmp.command("echo              log")
+            lmp.command("variable          li equal %f" % li)
+            lmp.command("variable          lf equal %f" % lf)
+            lmp.command("variable          p0 equal %f" % p0)
+            lmp.command("variable          pf equal %f" % pf)
 
-        lmp = ph.set_pair_style(lmp, self.calc)
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # read in conf
-        # conf = os.path.join(self.simfolder, "conf.dump")
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        lmp = ph.read_data(lmp, conf)
+            # read in conf
+            # conf = os.path.join(self.simfolder, "conf.dump")
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            lmp = ph.read_data(lmp, conf)
 
-        # set up potential
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            # set up potential
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # remap the box to get the correct pressure
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            # remap the box to get the correct pressure
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # equilibrate first
-        lmp.command(
-            "fix               1 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                p0,
-                p0,
-                self.calc.md.barostat_damping[1],
+            # equilibrate first
+            lmp.command(
+                "fix               1 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    p0,
+                    p0,
+                    self.calc.md.barostat_damping[1],
+                )
             )
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        lmp.command("unfix             1")
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("unfix             1")
 
-        # now scale system to final temp, thereby recording enerfy at every step
-        lmp.command("variable          step    equal step")
-        lmp.command("variable          dU      equal pe/atoms")
-        lmp.command("variable          lambda equal ramp(${li},${lf})")
-        lmp.command("variable          pp equal ramp(${p0},${pf})")
+            # now scale system to final temp, thereby recording enerfy at every step
+            lmp.command("variable          step    equal step")
+            lmp.command("variable          dU      equal pe/atoms")
+            lmp.command("variable          lambda equal ramp(${li},${lf})")
+            lmp.command("variable          pp equal ramp(${p0},${pf})")
 
-        lmp.command(
-            "fix               f2 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                p0,
-                pf,
-                self.calc.md.barostat_damping[1],
+            lmp.command(
+                "fix               f2 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    p0,
+                    pf,
+                    self.calc.md.barostat_damping[1],
+                )
             )
-        )
-        lmp.command(
-            'fix               f3 all print 1 "${dU} ${pp} $(vol) ${lambda}" '
-            'title "# dU[eV/atom] press[bar] vol[A^3] lambda" '
-            "screen no file ps.forward_%d.dat"
-            % iteration
-        )
-        lmp.command("run               %d" % self.calc._n_sweep_steps)
-
-        lmp.command("unfix             f2")
-        lmp.command("unfix             f3")
-
-        lmp.command(
-            "fix               1 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                pf,
-                pf,
-                self.calc.md.barostat_damping[1],
+            lmp.command(
+                'fix               f3 all print 1 "${dU} ${pp} $(vol) ${lambda}" '
+                'title "# dU[eV/atom] press[bar] vol[A^3] lambda" '
+                "screen no file ps.forward_%d.dat"
+                % iteration
             )
-        )
-        lmp.command("run               %d" % self.calc.n_equilibration_steps)
-        lmp.command("unfix             1")
+            lmp.command("run               %d" % self.calc._n_sweep_steps)
 
-        # start reverse loop
-        lmp.command("variable          lambda equal ramp(${lf},${li})")
-        lmp.command("variable          pp equal ramp(${pf},${p0})")
+            lmp.command("unfix             f2")
+            lmp.command("unfix             f3")
 
-        lmp.command(
-            "fix               f2 all npt temp %f %f %f %s %f %f %f"
-            % (
-                t0,
-                t0,
-                self.calc.md.thermostat_damping[1],
-                self.iso,
-                pf,
-                p0,
-                self.calc.md.barostat_damping[1],
+            lmp.command(
+                "fix               1 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    pf,
+                    pf,
+                    self.calc.md.barostat_damping[1],
+                )
             )
-        )
-        lmp.command(
-            'fix               f3 all print 1 "${dU} ${pp} $(vol) ${lambda}" '
-            'title "# dU[eV/atom] press[bar] vol[A^3] lambda" '
-            "screen no file ps.backward_%d.dat"
-            % iteration
-        )
-        lmp.command("run               %d" % self.calc._n_sweep_steps)
+            lmp.command("run               %d" % self.calc.n_equilibration_steps)
+            lmp.command("unfix             1")
 
-        # close + rotate the log (previously pressure_scaling never closed lmp)
-        self.lammps_close(lmp=lmp)
+            # start reverse loop
+            lmp.command("variable          lambda equal ramp(${lf},${li})")
+            lmp.command("variable          pp equal ramp(${pf},${p0})")
+
+            lmp.command(
+                "fix               f2 all npt temp %f %f %f %s %f %f %f"
+                % (
+                    t0,
+                    t0,
+                    self.calc.md.thermostat_damping[1],
+                    self.iso,
+                    pf,
+                    p0,
+                    self.calc.md.barostat_damping[1],
+                )
+            )
+            lmp.command(
+                'fix               f3 all print 1 "${dU} ${pp} $(vol) ${lambda}" '
+                'title "# dU[eV/atom] press[bar] vol[A^3] lambda" '
+                "screen no file ps.backward_%d.dat"
+                % iteration
+            )
+            lmp.command("run               %d" % self.calc._n_sweep_steps)
+
         lmp.rotate_logs("pressure_scaling")
 
         self.logger.info("Please cite the following publications:")
