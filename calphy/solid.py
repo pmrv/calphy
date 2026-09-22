@@ -192,62 +192,60 @@ class Solid(cph.Phase):
         At the end of the run, the averaged box dimensions are calculated.
         """
 
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        # set up potential
-        lmp = ph.set_pair_style(lmp, self.calc)
+            # set up potential
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # set up structure
-        lmp = ph.create_structure(lmp, self.calc)
+            # set up structure
+            lmp = ph.create_structure(lmp, self.calc)
 
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # add some computes
-        lmp.command("variable         mvol equal vol")
-        lmp.command("variable         mlx equal lx")
-        lmp.command("variable         mly equal ly")
-        lmp.command("variable         mlz equal lz")
-        lmp.command("variable         mpress equal press")
-        lmp.command("variable         mpe equal pe/atoms")
-        lmp.command("variable         metotal equal etotal/atoms")
-        lmp.command("variable         mtemp equal temp")
+            # add some computes
+            lmp.command("variable         mvol equal vol")
+            lmp.command("variable         mlx equal lx")
+            lmp.command("variable         mly equal ly")
+            lmp.command("variable         mlz equal lz")
+            lmp.command("variable         mpress equal press")
+            lmp.command("variable         mpe equal pe/atoms")
+            lmp.command("variable         metotal equal etotal/atoms")
+            lmp.command("variable         mtemp equal temp")
 
-        # Run if a constrained lattice is not needed
-        if not self.calc._fix_lattice:
-            if self.calc._pressure == 0:
-                self.run_zero_pressure_equilibration(lmp)
+            # Run if a constrained lattice is not needed
+            if not self.calc._fix_lattice:
+                if self.calc._pressure == 0:
+                    self.run_zero_pressure_equilibration(lmp)
+                else:
+                    self.run_finite_pressure_equilibration(lmp)
+
+                # equilibration-frame dump (post warm-up; no-op unless
+                # n_print_steps_equilibration > 0)
+                self.start_equilibration_dump(lmp)
+
+                # this is when the averaging routine starts
+                self.run_pressure_convergence(lmp)
+
+                # dump snapshot and check if melted
+                self.dump_current_snapshot(lmp, "traj.equilibration_stage1.dat")
+                self.check_if_melted(lmp, "traj.equilibration_stage1.dat")
+
+            # run if a constrained lattice is used
             else:
-                self.run_finite_pressure_equilibration(lmp)
+                self.start_equilibration_dump(lmp)
+                # routine in which lattice constant will not varied, but is set to a given fixed value
+                self.run_constrained_pressure_convergence(lmp)
 
-            # equilibration-frame dump (post warm-up; no-op unless
-            # n_print_steps_equilibration > 0)
-            self.start_equilibration_dump(lmp)
+            # start MSD calculation routine
+            # there two possibilities here - if spring constants are provided, use it. If not, calculate it
+            self.run_spring_constant_convergence(lmp)
 
-            # this is when the averaging routine starts
-            self.run_pressure_convergence(lmp)
-
-            # dump snapshot and check if melted
-            self.dump_current_snapshot(lmp, "traj.equilibration_stage1.dat")
-            self.check_if_melted(lmp, "traj.equilibration_stage1.dat")
-
-        # run if a constrained lattice is used
-        else:
-            self.start_equilibration_dump(lmp)
-            # routine in which lattice constant will not varied, but is set to a given fixed value
-            self.run_constrained_pressure_convergence(lmp)
-
-        # start MSD calculation routine
-        # there two possibilities here - if spring constants are provided, use it. If not, calculate it
-        self.run_spring_constant_convergence(lmp)
-
-        # check for melting
-        self.stop_equilibration_dump(lmp)
-        self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
-        self.check_if_melted(lmp, "traj.equilibration_stage2.dat")
-        lmp = ph.write_data(lmp, "conf.equilibration.data")
-        # close object and process traj
-        self.lammps_close(lmp=lmp)
+            # check for melting
+            self.stop_equilibration_dump(lmp)
+            self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
+            self.check_if_melted(lmp, "traj.equilibration_stage2.dat")
+            lmp = ph.write_data(lmp, "conf.equilibration.data")
         lmp.rotate_logs("averaging")
 
     def run_integration(self, iteration=1):
@@ -268,238 +266,236 @@ class Solid(cph.Phase):
         Run the integration routine where the initial and final systems are connected using
         the lambda parameter. See algorithm 4 in publication.
         """
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        # set up potential
-        lmp = ph.set_pair_style(lmp, self.calc)
+            # set up potential
+            lmp = ph.set_pair_style(lmp, self.calc)
 
-        # read in the conf file: the equilibrated configuration, or for later
-        # iterations the end of the previous backward leg (see
-        # _integration_start_configuration)
-        conf = self._integration_start_configuration(iteration)
-        lmp = ph.read_data(lmp, conf)
+            # read in the conf file: the equilibrated configuration, or for later
+            # iterations the end of the previous backward leg (see
+            # _integration_start_configuration)
+            conf = self._integration_start_configuration(iteration)
+            lmp = ph.read_data(lmp, conf)
 
-        lmp = ph.set_pair_coeff(lmp, self.calc)
-        lmp = ph.set_mass(lmp, self.calc)
+            lmp = ph.set_pair_coeff(lmp, self.calc)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # remap the box to get the correct pressure
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            # remap the box to get the correct pressure
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        # create groups - each species belong to one group
-        for i in range(self.calc.n_elements):
-            lmp.command("group  g%d type %d" % (i + 1, i + 1))
+            # create groups - each species belong to one group
+            for i in range(self.calc.n_elements):
+                lmp.command("group  g%d type %d" % (i + 1, i + 1))
 
-        # get counts of each group
-        for i in range(self.calc.n_elements):
-            lmp.command("variable   count%d equal count(g%d)" % (i + 1, i + 1))
+            # get counts of each group
+            for i in range(self.calc.n_elements):
+                lmp.command("variable   count%d equal count(g%d)" % (i + 1, i + 1))
 
-        # initialise everything
-        lmp.command("run               0")
+            # initialise everything
+            lmp.command("run               0")
 
-        # apply initial fixes
-        lmp.command("fix               f1 all nve")
+            # apply initial fixes
+            lmp.command("fix               f1 all nve")
 
-        # apply fix for each spring
-        # TODO: Add option to select function
-        for i in range(self.calc.n_elements):
-            lmp.command(
-                "fix               ff%d g%d ti/spring 10.0 100 100 function 2"
-                % (i + 1, i + 1)
-            )
-
-        # apply temp fix
-        if self.calc._qtb:
-            qtb = self.calc.quantum_thermal_bath
-            lmp.command(
-                "fix               f3 all qtb temp %f damp %f seed %d f_max %f N_f %d"
-                % (
-                    self.calc._temperature,
-                    qtb.thermostat_damping,
-                    np.random.randint(1, 10**8),
-                    qtb.f_max,
-                    qtb.n_f,
+            # apply fix for each spring
+            # TODO: Add option to select function
+            for i in range(self.calc.n_elements):
+                lmp.command(
+                    "fix               ff%d g%d ti/spring 10.0 100 100 function 2"
+                    % (i + 1, i + 1)
                 )
-            )
-            # QTB does not consume a base temperature compute, so the temp/com
-            # group/correction trick used by langevin does not apply.
-            lmp.command("compute           Tcm all temp/com")
-        else:
-            lmp.command(
-                "fix               f3 all langevin %f %f %f %d zero yes"
-                % (
-                    self.calc._temperature,
-                    self.calc._temperature,
-                    self.calc.md.thermostat_damping[1],
-                    np.random.randint(1, 10000),
+
+            # apply temp fix
+            if self.calc._qtb:
+                qtb = self.calc.quantum_thermal_bath
+                lmp.command(
+                    "fix               f3 all qtb temp %f damp %f seed %d f_max %f N_f %d"
+                    % (
+                        self.calc._temperature,
+                        qtb.thermostat_damping,
+                        np.random.randint(1, 10**8),
+                        qtb.f_max,
+                        qtb.n_f,
+                    )
                 )
-            )
-
-            # compute com and apply to fix
-            lmp.command("compute           Tcm all temp/com")
-            lmp.command("fix_modify        f3 temp Tcm")
-
-        lmp.command("variable          step    equal step")
-        lmp.command("variable          dU1      equal pe/atoms")
-        for i in range(self.calc.n_elements):
-            lmp.command("variable          dU%d      equal f_ff%d" % (i + 2, i + 1))
-
-        lmp.command("variable          lambda  equal f_ff1[1]")
-
-        # add thermo command to force variable evaluation
-        lmp.command("thermo_style      custom step pe c_Tcm")
-        lmp.command("thermo            10000")
-
-        # Create velocity
-        lmp.command(
-            "velocity          all create %f %d mom yes rot yes dist gaussian"
-            % (self.calc._temperature, np.random.randint(1, 10000))
-        )
-
-        # Both equilibration blocks of the cycle are warm starts.  The first
-        # one re-thermalises an already equilibrated configuration whose
-        # velocities were just regenerated; the second holds the system at the
-        # Einstein-crystal end (lambda = 1), a set of damped harmonic
-        # oscillators that forgets its initial state within a few thermostat
-        # relaxation times.  fix ti/spring drives its lambda schedule off a
-        # single t_equil, so the two blocks must have the same length and it
-        # is passed to the fix here.
-        n_equil = self._warm_start_steps(npt=False)
-        self.logger.info(
-            "integration iteration %d: equilibration blocks of %d steps "
-            "(warm start; n_equilibration_steps = %d)",
-            iteration, n_equil, self.calc.n_equilibration_steps,
-        )
-
-        # reapply
-        for i in range(self.calc.n_elements):
-            lmp.command(
-                "fix               ff%d g%d ti/spring %f %d %d function 2"
-                % (
-                    i + 1,
-                    i + 1,
-                    self.k[i],
-                    self.calc._n_switching_steps,
-                    n_equil,
+                # QTB does not consume a base temperature compute, so the temp/com
+                # group/correction trick used by langevin does not apply.
+                lmp.command("compute           Tcm all temp/com")
+            else:
+                lmp.command(
+                    "fix               f3 all langevin %f %f %f %d zero yes"
+                    % (
+                        self.calc._temperature,
+                        self.calc._temperature,
+                        self.calc.md.thermostat_damping[1],
+                        np.random.randint(1, 10000),
+                    )
                 )
-            )
 
-        # Equilibriate structure
-        lmp.command("run               %d" % n_equil)
+                # compute com and apply to fix
+                lmp.command("compute           Tcm all temp/com")
+                lmp.command("fix_modify        f3 temp Tcm")
 
-        # write out energy
-        str1 = 'fix f4 all print 1 "${dU1} '
-        str2 = []
-        for i in range(self.calc.n_elements):
-            str2.append("${dU%d}" % (i + 2))
+            lmp.command("variable          step    equal step")
+            lmp.command("variable          dU1      equal pe/atoms")
+            for i in range(self.calc.n_elements):
+                lmp.command("variable          dU%d      equal f_ff%d" % (i + 2, i + 1))
 
-        str2.append('${lambda}"')
-        str2 = " ".join(str2)
-        title_cols = (
-            ["dU_sys[eV/atom]"]
-            + ["dU_ref%d[eV/atom]" % (i + 1) for i in range(self.calc.n_elements)]
-            + ["lambda"]
-        )
-        str3 = ' title "# %s" screen no file forward_%d.dat' % (
-            " ".join(title_cols),
-            iteration,
-        )
-        command = str1 + str2 + str3
-        lmp.command(command)
+            lmp.command("variable          lambda  equal f_ff1[1]")
 
-        if self.calc.n_print_steps > 0:
+            # add thermo command to force variable evaluation
+            lmp.command("thermo_style      custom step pe c_Tcm")
+            lmp.command("thermo            10000")
+
+            # Create velocity
             lmp.command(
-                "dump              d1 all custom %d traj.fe.forward_%d.dat id type mass x y z fx fy fz"
-                % (self.calc.n_print_steps, iteration)
+                "velocity          all create %f %d mom yes rot yes dist gaussian"
+                % (self.calc._temperature, np.random.randint(1, 10000))
             )
 
-        # turn on swap moves
-        # if self.calc.monte_carlo.n_swaps > 0:
-        #    self.logger.info(f'{self.calc.monte_carlo.n_swaps} swap moves are performed between 1 and 2 every {self.calc.monte_carlo.n_steps}')
-        #    lmp.command("fix  swap all atom/swap %d %d %d %d ke yes types 1 2"%(self.calc.monte_carlo.n_steps,
-        #                                                                        self.calc.monte_carlo.n_swaps,
-        #                                                                        np.random.randint(1, 10000),
-        #                                                                        self.calc._temperature))
-        #
-        #    lmp.command("variable a equal f_swap[1]")
-        #    lmp.command("variable b equal f_swap[2]")
-        #    lmp.command("fix             swap2 all print 1 \"${a} ${b}\" screen no file swap.fe.forward_%d.dat"%iteration)
-
-        # Forward switching over ts steps
-        lmp.command("run               %d" % self.calc._n_switching_steps)
-        lmp.command("unfix             f4")
-
-        if self.calc.n_print_steps > 0:
-            lmp.command("undump           d1")
-
-        # if self.calc.monte_carlo.n_swaps > 0:
-        #    lmp.command("unfix swap")
-        #    lmp.command("unfix swap2")
-
-        # Equilibrate at the Einstein-crystal end.  fix ti/spring holds
-        # lambda at exactly 1 for this whole run, so the interatomic forces
-        # enter as (1 - lambda) * f = 0 and the pair style would be evaluated
-        # every step only to be multiplied by zero.  Switching the pair
-        # compute off leaves the trajectory bitwise identical and makes this
-        # block essentially free; it is switched back on before the backward
-        # leg, which needs the real forces and energies again.
-        lmp.command("pair_modify       compute no")
-        lmp.command("run               %d" % n_equil)
-        lmp.command("pair_modify       compute yes")
-
-        # write out energy
-        str1 = 'fix f4 all print 1 "${dU1} '
-        str2 = []
-        for i in range(self.calc.n_elements):
-            str2.append("${dU%d}" % (i + 2))
-
-        str2.append('${lambda}"')
-        str2 = " ".join(str2)
-        title_cols = (
-            ["dU_sys[eV/atom]"]
-            + ["dU_ref%d[eV/atom]" % (i + 1) for i in range(self.calc.n_elements)]
-            + ["lambda"]
-        )
-        str3 = ' title "# %s" screen no file backward_%d.dat' % (
-            " ".join(title_cols),
-            iteration,
-        )
-        command = str1 + str2 + str3
-        lmp.command(command)
-
-        if self.calc.n_print_steps > 0:
-            lmp.command(
-                "dump              d1 all custom %d traj.fe.backward_%d.dat id type mass x y z fx fy fz"
-                % (self.calc.n_print_steps, iteration)
+            # Both equilibration blocks of the cycle are warm starts.  The first
+            # one re-thermalises an already equilibrated configuration whose
+            # velocities were just regenerated; the second holds the system at the
+            # Einstein-crystal end (lambda = 1), a set of damped harmonic
+            # oscillators that forgets its initial state within a few thermostat
+            # relaxation times.  fix ti/spring drives its lambda schedule off a
+            # single t_equil, so the two blocks must have the same length and it
+            # is passed to the fix here.
+            n_equil = self._warm_start_steps(npt=False)
+            self.logger.info(
+                "integration iteration %d: equilibration blocks of %d steps "
+                "(warm start; n_equilibration_steps = %d)",
+                iteration, n_equil, self.calc.n_equilibration_steps,
             )
 
-        # add swaps if n_swap is > 0
-        # if self.calc.monte_carlo.n_swaps > 0:
-        #    self.logger.info(f'{self.calc.monte_carlo.n_swaps} swap moves are performed between 1 and 2 every {self.calc.monte_carlo.n_steps}')
-        #    lmp.command("fix  swap all atom/swap %d %d %d %d ke yes types 2 1"%(self.calc.monte_carlo.n_steps,
-        #                                                                        self.calc.monte_carlo.n_swaps,
-        #                                                                        np.random.randint(1, 10000),
-        #                                                                        self.calc._temperature))
-        #
-        #    lmp.command("variable a equal f_swap[1]")
-        #    lmp.command("variable b equal f_swap[2]")
-        #    lmp.command("fix             swap2 all print 1 \"${a} ${b}\" screen no file swap.fe.backward_%d.dat"%iteration)
+            # reapply
+            for i in range(self.calc.n_elements):
+                lmp.command(
+                    "fix               ff%d g%d ti/spring %f %d %d function 2"
+                    % (
+                        i + 1,
+                        i + 1,
+                        self.k[i],
+                        self.calc._n_switching_steps,
+                        n_equil,
+                    )
+                )
 
-        # Reverse switching over ts steps
-        lmp.command("run               %d" % self.calc._n_switching_steps)
-        lmp.command("unfix             f4")
+            # Equilibriate structure
+            lmp.command("run               %d" % n_equil)
 
-        if self.calc.n_print_steps > 0:
-            lmp.command("undump           d1")
+            # write out energy
+            str1 = 'fix f4 all print 1 "${dU1} '
+            str2 = []
+            for i in range(self.calc.n_elements):
+                str2.append("${dU%d}" % (i + 2))
 
-        # if self.calc.monte_carlo.n_swaps > 0:
-        #    lmp.command("unfix swap")
-        #    lmp.command("unfix swap2")
+            str2.append('${lambda}"')
+            str2 = " ".join(str2)
+            title_cols = (
+                ["dU_sys[eV/atom]"]
+                + ["dU_ref%d[eV/atom]" % (i + 1) for i in range(self.calc.n_elements)]
+                + ["lambda"]
+            )
+            str3 = ' title "# %s" screen no file forward_%d.dat' % (
+                " ".join(title_cols),
+                iteration,
+            )
+            command = str1 + str2 + str3
+            lmp.command(command)
 
-        # the real system at T again: starting point of the next iteration
-        lmp = ph.write_data(lmp, "conf.fe.backward_%d.data" % iteration)
+            if self.calc.n_print_steps > 0:
+                lmp.command(
+                    "dump              d1 all custom %d traj.fe.forward_%d.dat id type mass x y z fx fy fz"
+                    % (self.calc.n_print_steps, iteration)
+                )
 
-        # close object
-        self.lammps_close(lmp=lmp)
+            # turn on swap moves
+            # if self.calc.monte_carlo.n_swaps > 0:
+            #    self.logger.info(f'{self.calc.monte_carlo.n_swaps} swap moves are performed between 1 and 2 every {self.calc.monte_carlo.n_steps}')
+            #    lmp.command("fix  swap all atom/swap %d %d %d %d ke yes types 1 2"%(self.calc.monte_carlo.n_steps,
+            #                                                                        self.calc.monte_carlo.n_swaps,
+            #                                                                        np.random.randint(1, 10000),
+            #                                                                        self.calc._temperature))
+            #
+            #    lmp.command("variable a equal f_swap[1]")
+            #    lmp.command("variable b equal f_swap[2]")
+            #    lmp.command("fix             swap2 all print 1 \"${a} ${b}\" screen no file swap.fe.forward_%d.dat"%iteration)
+
+            # Forward switching over ts steps
+            lmp.command("run               %d" % self.calc._n_switching_steps)
+            lmp.command("unfix             f4")
+
+            if self.calc.n_print_steps > 0:
+                lmp.command("undump           d1")
+
+            # if self.calc.monte_carlo.n_swaps > 0:
+            #    lmp.command("unfix swap")
+            #    lmp.command("unfix swap2")
+
+            # Equilibrate at the Einstein-crystal end.  fix ti/spring holds
+            # lambda at exactly 1 for this whole run, so the interatomic forces
+            # enter as (1 - lambda) * f = 0 and the pair style would be evaluated
+            # every step only to be multiplied by zero.  Switching the pair
+            # compute off leaves the trajectory bitwise identical and makes this
+            # block essentially free; it is switched back on before the backward
+            # leg, which needs the real forces and energies again.
+            lmp.command("pair_modify       compute no")
+            lmp.command("run               %d" % n_equil)
+            lmp.command("pair_modify       compute yes")
+
+            # write out energy
+            str1 = 'fix f4 all print 1 "${dU1} '
+            str2 = []
+            for i in range(self.calc.n_elements):
+                str2.append("${dU%d}" % (i + 2))
+
+            str2.append('${lambda}"')
+            str2 = " ".join(str2)
+            title_cols = (
+                ["dU_sys[eV/atom]"]
+                + ["dU_ref%d[eV/atom]" % (i + 1) for i in range(self.calc.n_elements)]
+                + ["lambda"]
+            )
+            str3 = ' title "# %s" screen no file backward_%d.dat' % (
+                " ".join(title_cols),
+                iteration,
+            )
+            command = str1 + str2 + str3
+            lmp.command(command)
+
+            if self.calc.n_print_steps > 0:
+                lmp.command(
+                    "dump              d1 all custom %d traj.fe.backward_%d.dat id type mass x y z fx fy fz"
+                    % (self.calc.n_print_steps, iteration)
+                )
+
+            # add swaps if n_swap is > 0
+            # if self.calc.monte_carlo.n_swaps > 0:
+            #    self.logger.info(f'{self.calc.monte_carlo.n_swaps} swap moves are performed between 1 and 2 every {self.calc.monte_carlo.n_steps}')
+            #    lmp.command("fix  swap all atom/swap %d %d %d %d ke yes types 2 1"%(self.calc.monte_carlo.n_steps,
+            #                                                                        self.calc.monte_carlo.n_swaps,
+            #                                                                        np.random.randint(1, 10000),
+            #                                                                        self.calc._temperature))
+            #
+            #    lmp.command("variable a equal f_swap[1]")
+            #    lmp.command("variable b equal f_swap[2]")
+            #    lmp.command("fix             swap2 all print 1 \"${a} ${b}\" screen no file swap.fe.backward_%d.dat"%iteration)
+
+            # Reverse switching over ts steps
+            lmp.command("run               %d" % self.calc._n_switching_steps)
+            lmp.command("unfix             f4")
+
+            if self.calc.n_print_steps > 0:
+                lmp.command("undump           d1")
+
+            # if self.calc.monte_carlo.n_swaps > 0:
+            #    lmp.command("unfix swap")
+            #    lmp.command("unfix swap2")
+
+            # the real system at T again: starting point of the next iteration
+            lmp = ph.write_data(lmp, "conf.fe.backward_%d.data" % iteration)
+
         lmp.rotate_logs("integration")
 
     def thermodynamic_integration(self):

@@ -175,61 +175,60 @@ class Alchemy(cph.Phase):
         """Coupling-mode integration: ramp ONLY the last component 0->1
         (forward) and 1->0 (backward) over the fixed base.
         W = int <U_last>_lam dlam;  dF = (W_f + W_b)/2 per iteration."""
-        lmp = ph.create_object(self.calc, self.simfolder)
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        # style only before read_data (pair_coeff needs the box)
-        ns = self.calc._pair_style_with_options
-        terms = " ".join(f"1.0 {s}" for s in ns[:-1]) + f" 0.0 {ns[-1]}"
-        lmp.command("pair_style       hybrid/scaled %s" % terms)
-        lmp = ph.read_data(lmp, conf)
-        self._coupling_pair(lmp, ramp="0.0")
-        lmp = ph.set_mass(lmp, self.calc)
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
-        lmp.command(
-            "velocity          all create %f %d mom yes rot yes dist gaussian"
-            % (self.calc._temperature, np.random.randint(1, 10000)))
-        if self.calc.npt:
+        with ph.create_object(self.calc, self.simfolder) as lmp:
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            # style only before read_data (pair_coeff needs the box)
+            ns = self.calc._pair_style_with_options
+            terms = " ".join(f"1.0 {s}" for s in ns[:-1]) + f" 0.0 {ns[-1]}"
+            lmp.command("pair_style       hybrid/scaled %s" % terms)
+            lmp = ph.read_data(lmp, conf)
+            self._coupling_pair(lmp, ramp="0.0")
+            lmp = ph.set_mass(lmp, self.calc)
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
             lmp.command(
-                "fix             f1 all npt temp %f %f %f %s %f %f %f"
-                % (self.calc._temperature, self.calc._temperature,
-                   self.calc.md.thermostat_damping[1], self.iso,
-                   self.calc._pressure, self.calc._pressure,
-                   self.calc.md.barostat_damping[1]))
-        else:
-            lmp.command("fix             f1 all nvt temp %f %f %f"
-                        % (self.calc._temperature, self.calc._temperature,
-                           self.calc.md.thermostat_damping[1]))
-        lmp.command("thermo_style    custom step pe")
-        lmp.command("thermo          1000")
-        lmp.command("run             %d" % self.calc.n_equilibration_steps)
+                "velocity          all create %f %d mom yes rot yes dist gaussian"
+                % (self.calc._temperature, np.random.randint(1, 10000)))
+            if self.calc.npt:
+                lmp.command(
+                    "fix             f1 all npt temp %f %f %f %s %f %f %f"
+                    % (self.calc._temperature, self.calc._temperature,
+                       self.calc.md.thermostat_damping[1], self.iso,
+                       self.calc._pressure, self.calc._pressure,
+                       self.calc.md.barostat_damping[1]))
+            else:
+                lmp.command("fix             f1 all nvt temp %f %f %f"
+                            % (self.calc._temperature, self.calc._temperature,
+                               self.calc.md.thermostat_damping[1]))
+            lmp.command("thermo_style    custom step pe")
+            lmp.command("thermo          1000")
+            lmp.command("run             %d" % self.calc.n_equilibration_steps)
 
-        # forward: 0 -> 1
-        lmp.command("variable         clambda equal ramp(0.0,1.0)")
-        self._coupling_pair(lmp, ramp="v_clambda", tag="f")
-        lmp.command(
-            'fix             f2 all print 1 "${dUcf} ${dUcf} ${clambda}" '
-            'title "# dU_ramped[eV/atom] dU_ramped[eV/atom] lambda" '
-            "screen no file forward_%d.dat" % iteration)
-        lmp.command("run             %d" % self.calc._n_switching_steps)
-        lmp.command("unfix           f2")
-        lmp.command("uncompute       cRf")
-        lmp.command("variable        clambda delete")
+            # forward: 0 -> 1
+            lmp.command("variable         clambda equal ramp(0.0,1.0)")
+            self._coupling_pair(lmp, ramp="v_clambda", tag="f")
+            lmp.command(
+                'fix             f2 all print 1 "${dUcf} ${dUcf} ${clambda}" '
+                'title "# dU_ramped[eV/atom] dU_ramped[eV/atom] lambda" '
+                "screen no file forward_%d.dat" % iteration)
+            lmp.command("run             %d" % self.calc._n_switching_steps)
+            lmp.command("unfix           f2")
+            lmp.command("uncompute       cRf")
+            lmp.command("variable        clambda delete")
 
-        # equilibrate at lam = 1 (full base + component)
-        self._coupling_pair(lmp, ramp="1.0")
-        lmp.command("run             %d" % self.calc.n_equilibration_steps)
+            # equilibrate at lam = 1 (full base + component)
+            self._coupling_pair(lmp, ramp="1.0")
+            lmp.command("run             %d" % self.calc.n_equilibration_steps)
 
-        # backward: 1 -> 0
-        lmp.command("variable         clambda equal ramp(1.0,0.0)")
-        self._coupling_pair(lmp, ramp="v_clambda", tag="b")
-        lmp.command(
-            'fix             f3 all print 1 "${dUcb} ${dUcb} ${clambda}" '
-            'title "# dU_ramped[eV/atom] dU_ramped[eV/atom] lambda" '
-            "screen no file backward_%d.dat" % iteration)
-        lmp.command("run             %d" % self.calc._n_switching_steps)
-        lmp.command("unfix           f3")
+            # backward: 1 -> 0
+            lmp.command("variable         clambda equal ramp(1.0,0.0)")
+            self._coupling_pair(lmp, ramp="v_clambda", tag="b")
+            lmp.command(
+                'fix             f3 all print 1 "${dUcb} ${dUcb} ${clambda}" '
+                'title "# dU_ramped[eV/atom] dU_ramped[eV/atom] lambda" '
+                "screen no file backward_%d.dat" % iteration)
+            lmp.command("run             %d" % self.calc._n_switching_steps)
+            lmp.command("unfix           f3")
 
-        self.lammps_close(lmp=lmp)
         lmp.rotate_logs("integration")
 
     def run_averaging(self):
@@ -253,72 +252,71 @@ class Alchemy(cph.Phase):
         Fix lattice option is not implemented at present.
         At the end of the run, the averaged box dimensions are calculated.
         """
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        if self.calc.alchemy_coupling:
-            # equilibrate on the BASE system (lam = 0): full base, ramped
-            # component at scale 0
-            ns = self.calc._pair_style_with_options
-            terms = (" ".join(f"1.0 {s}" for s in ns[:-1])
-                     + f" 0.0 {ns[-1]}")
-            lmp.command("pair_style       hybrid/scaled %s" % terms)
-            lmp = ph.create_structure(lmp, self.calc)
-            self._coupling_pair(lmp, ramp="0.0")
-        else:
-            # equilibrate with the initial potential on its own
-            initial, _ = self._end_states()
-            lmp.command(self._pure_pair_style_command(initial))
-
-            # set up structure
-            lmp = ph.create_structure(lmp, self.calc)
-
-            # set up potential
-            for command in self._pure_pair_coeff_commands(initial):
-                lmp.command(command)
-        lmp = ph.set_mass(lmp, self.calc)
-
-        # add some computes
-        lmp.command("variable         mvol equal vol")
-        lmp.command("variable         mlx equal lx")
-        lmp.command("variable         mly equal ly")
-        lmp.command("variable         mlz equal lz")
-        lmp.command("variable         mpress equal press")
-        lmp.command("variable         mpe equal pe/atoms")
-        lmp.command("variable         metotal equal etotal/atoms")
-        lmp.command("variable         mtemp equal temp")
-
-        # add some computes
-        if not self.calc._fix_lattice:
-            if self.calc._pressure == 0:
-                self.run_zero_pressure_equilibration(lmp)
+            if self.calc.alchemy_coupling:
+                # equilibrate on the BASE system (lam = 0): full base, ramped
+                # component at scale 0
+                ns = self.calc._pair_style_with_options
+                terms = (" ".join(f"1.0 {s}" for s in ns[:-1])
+                         + f" 0.0 {ns[-1]}")
+                lmp.command("pair_style       hybrid/scaled %s" % terms)
+                lmp = ph.create_structure(lmp, self.calc)
+                self._coupling_pair(lmp, ramp="0.0")
             else:
-                self.run_finite_pressure_equilibration(lmp)
+                # equilibrate with the initial potential on its own
+                initial, _ = self._end_states()
+                lmp.command(self._pure_pair_style_command(initial))
 
-            # equilibration-frame dump (no-op unless
-            # n_print_steps_equilibration > 0)
-            self.start_equilibration_dump(lmp)
+                # set up structure
+                lmp = ph.create_structure(lmp, self.calc)
 
-            # this is when the averaging routine starts
-            self.run_pressure_convergence(lmp)
+                # set up potential
+                for command in self._pure_pair_coeff_commands(initial):
+                    lmp.command(command)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        # run if a constrained lattice is used
-        else:
-            self.start_equilibration_dump(lmp)
-            # routine in which lattice constant will not varied, but is set to a given fixed value
-            self.run_constrained_pressure_convergence(lmp)
+            # add some computes
+            lmp.command("variable         mvol equal vol")
+            lmp.command("variable         mlx equal lx")
+            lmp.command("variable         mly equal ly")
+            lmp.command("variable         mlz equal lz")
+            lmp.command("variable         mpress equal press")
+            lmp.command("variable         mpe equal pe/atoms")
+            lmp.command("variable         metotal equal etotal/atoms")
+            lmp.command("variable         mtemp equal temp")
 
-        # check for melting (skip in coupling mode: the base ensemble may
-        # legitimately be a liquid — the phase was validated when its
-        # baseline free energy was measured)
-        self.stop_equilibration_dump(lmp)
-        self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
-        if not self.calc.alchemy_coupling:
-            self.check_if_melted(lmp, "traj.equilibration_stage2.dat")
+            # add some computes
+            if not self.calc._fix_lattice:
+                if self.calc._pressure == 0:
+                    self.run_zero_pressure_equilibration(lmp)
+                else:
+                    self.run_finite_pressure_equilibration(lmp)
 
-        # close object and process traj
-        lmp = ph.write_data(lmp, "conf.equilibration.data")
+                # equilibration-frame dump (no-op unless
+                # n_print_steps_equilibration > 0)
+                self.start_equilibration_dump(lmp)
 
-        self.lammps_close(lmp=lmp)
+                # this is when the averaging routine starts
+                self.run_pressure_convergence(lmp)
+
+            # run if a constrained lattice is used
+            else:
+                self.start_equilibration_dump(lmp)
+                # routine in which lattice constant will not varied, but is set to a given fixed value
+                self.run_constrained_pressure_convergence(lmp)
+
+            # check for melting (skip in coupling mode: the base ensemble may
+            # legitimately be a liquid — the phase was validated when its
+            # baseline free energy was measured)
+            self.stop_equilibration_dump(lmp)
+            self.dump_current_snapshot(lmp, "traj.equilibration_stage2.dat")
+            if not self.calc.alchemy_coupling:
+                self.check_if_melted(lmp, "traj.equilibration_stage2.dat")
+
+            # process traj
+            lmp = ph.write_data(lmp, "conf.equilibration.data")
+
         lmp.rotate_logs("averaging")
 
     def run_integration(self, iteration=1):
@@ -345,143 +343,142 @@ class Alchemy(cph.Phase):
         initial, final = self._end_states()
 
         # create lammps object
-        lmp = ph.create_object(self.calc, self.simfolder)
+        with ph.create_object(self.calc, self.simfolder) as lmp:
 
-        # Adiabatic switching parameters.
-        lmp.command("variable        li       equal   1.0")
-        lmp.command("variable        lf       equal   0.0")
+            # Adiabatic switching parameters.
+            lmp.command("variable        li       equal   1.0")
+            lmp.command("variable        lf       equal   0.0")
 
-        # the equilibrated configuration is read in with the initial potential
-        lmp.command(self._pure_pair_style_command(initial))
-        conf = os.path.join(self.simfolder, "conf.equilibration.data")
-        lmp = ph.read_data(lmp, conf)
-        for command in self._pure_pair_coeff_commands(initial):
-            lmp.command(command)
-        lmp = ph.set_mass(lmp, self.calc)
+            # the equilibrated configuration is read in with the initial potential
+            lmp.command(self._pure_pair_style_command(initial))
+            conf = os.path.join(self.simfolder, "conf.equilibration.data")
+            lmp = ph.read_data(lmp, conf)
+            for command in self._pure_pair_coeff_commands(initial):
+                lmp.command(command)
+            lmp = ph.set_mass(lmp, self.calc)
 
-        lmp.command("group g1 type 1")
-        lmp.command("group g2 type 2")
+            lmp.command("group g1 type 1")
+            lmp.command("group g2 type 2")
 
-        # remap the box to get the correct pressure
-        lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
+            # remap the box to get the correct pressure
+            lmp = ph.remap_box(lmp, self.lx, self.ly, self.lz)
 
-        lmp.command(
-            "velocity          all create %f %d mom yes rot yes dist gaussian"
-            % (self.calc._temperature, np.random.randint(1, 10000))
-        )
-        # Integrator & thermostat.
-        if self.calc.npt:
             lmp.command(
-                "fix             f1 all npt temp %f %f %f %s %f %f %f"
-                % (
-                    self.calc._temperature,
-                    self.calc._temperature,
-                    self.calc.md.thermostat_damping[1],
-                    self.iso,
-                    self.calc._pressure,
-                    self.calc._pressure,
-                    self.calc.md.barostat_damping[1],
-                )
+                "velocity          all create %f %d mom yes rot yes dist gaussian"
+                % (self.calc._temperature, np.random.randint(1, 10000))
             )
-        else:
+            # Integrator & thermostat.
+            if self.calc.npt:
+                lmp.command(
+                    "fix             f1 all npt temp %f %f %f %s %f %f %f"
+                    % (
+                        self.calc._temperature,
+                        self.calc._temperature,
+                        self.calc.md.thermostat_damping[1],
+                        self.iso,
+                        self.calc._pressure,
+                        self.calc._pressure,
+                        self.calc.md.barostat_damping[1],
+                    )
+                )
+            else:
+                lmp.command(
+                    "fix             f1 all nvt temp %f %f %f"
+                    % (
+                        self.calc._temperature,
+                        self.calc._temperature,
+                        self.calc.md.thermostat_damping[1],
+                    )
+                )
+
+            lmp.command("thermo_style    custom step pe")
+            lmp.command("thermo          1000")
+            lmp.command("run             %d" % self.calc.n_equilibration_steps)
+
+            # equilibration run is over
+
+            # ---------------------------------------------------------------
+            # FWD cycle: initial potential scaled 1 -> 0, final potential 0 -> 1
+            # ---------------------------------------------------------------
+            lmp.command("variable         flambda equal ramp(${li},${lf})")
+            lmp.command("variable         blambda equal ramp(${lf},${li})")
+
+            commands, compute_ids = self._scaled_pair_commands(
+                initial, final, "v_flambda", "v_blambda"
+            )
+            for command in commands:
+                lmp.command(command)
+
+            swap_fixes = self._add_swap_fixes(
+                lmp, self.calc.monte_carlo.forward_swap_types, "Forward"
+            )
+
+            # Thermo output.
+            lmp.command("thermo_style    custom step v_dU1 v_dU2")
+            lmp.command("thermo          1000")
+
+            # save the necessary items to a file: first step
             lmp.command(
-                "fix             f1 all nvt temp %f %f %f"
-                % (
-                    self.calc._temperature,
-                    self.calc._temperature,
-                    self.calc.md.thermostat_damping[1],
-                )
+                'fix             f2 all print 1 "${dU1} ${dU2} ${flambda}" '
+                'title "# dU_1[eV/atom] dU_2[eV/atom] lambda" '
+                "screen no file forward_%d.dat"
+                % iteration
+            )
+            lmp.command("run             %d" % self.calc._n_switching_steps)
+
+            lmp.command("unfix           f2")
+            for compute_id in compute_ids:
+                lmp.command("uncompute       %s" % compute_id)
+            for swap_fix in swap_fixes:
+                lmp.command("unfix %s" % swap_fix)
+
+            # now equilibrate with the final potential on its own
+            lmp.command(self._pure_pair_style_command(final))
+            for command in self._pure_pair_coeff_commands(final):
+                lmp.command(command)
+
+            # Thermo output.
+            lmp.command("thermo_style    custom step pe")
+            lmp.command("thermo          1000")
+
+            # run eqbrm run
+            lmp.command("run             %d" % self.calc.n_equilibration_steps)
+
+            # ---------------------------------------------------------------
+            # BKD cycle: initial potential scaled 0 -> 1, final potential 1 -> 0
+            # ---------------------------------------------------------------
+            lmp.command("variable         flambda equal ramp(${lf},${li})")
+            lmp.command("variable         blambda equal ramp(${li},${lf})")
+
+            commands, compute_ids = self._scaled_pair_commands(
+                initial, final, "v_flambda", "v_blambda"
+            )
+            for command in commands:
+                lmp.command(command)
+
+            swap_fixes = self._add_swap_fixes(
+                lmp, self.calc.monte_carlo.reverse_swap_types, "Reverse"
             )
 
-        lmp.command("thermo_style    custom step pe")
-        lmp.command("thermo          1000")
-        lmp.command("run             %d" % self.calc.n_equilibration_steps)
+            # Thermo output.
+            lmp.command("thermo_style    custom step v_dU1 v_dU2")
+            lmp.command("thermo          1000")
 
-        # equilibration run is over
+            # save the necessary items to a file: first step
+            lmp.command(
+                'fix             f2 all print 1 "${dU1} ${dU2} ${flambda}" '
+                'title "# dU_1[eV/atom] dU_2[eV/atom] lambda" '
+                "screen no file backward_%d.dat"
+                % iteration
+            )
+            lmp.command("run             %d" % self.calc._n_switching_steps)
 
-        # ---------------------------------------------------------------
-        # FWD cycle: initial potential scaled 1 -> 0, final potential 0 -> 1
-        # ---------------------------------------------------------------
-        lmp.command("variable         flambda equal ramp(${li},${lf})")
-        lmp.command("variable         blambda equal ramp(${lf},${li})")
+            lmp.command("unfix           f2")
+            for compute_id in compute_ids:
+                lmp.command("uncompute       %s" % compute_id)
+            for swap_fix in swap_fixes:
+                lmp.command("unfix %s" % swap_fix)
 
-        commands, compute_ids = self._scaled_pair_commands(
-            initial, final, "v_flambda", "v_blambda"
-        )
-        for command in commands:
-            lmp.command(command)
-
-        swap_fixes = self._add_swap_fixes(
-            lmp, self.calc.monte_carlo.forward_swap_types, "Forward"
-        )
-
-        # Thermo output.
-        lmp.command("thermo_style    custom step v_dU1 v_dU2")
-        lmp.command("thermo          1000")
-
-        # save the necessary items to a file: first step
-        lmp.command(
-            'fix             f2 all print 1 "${dU1} ${dU2} ${flambda}" '
-            'title "# dU_1[eV/atom] dU_2[eV/atom] lambda" '
-            "screen no file forward_%d.dat"
-            % iteration
-        )
-        lmp.command("run             %d" % self.calc._n_switching_steps)
-
-        lmp.command("unfix           f2")
-        for compute_id in compute_ids:
-            lmp.command("uncompute       %s" % compute_id)
-        for swap_fix in swap_fixes:
-            lmp.command("unfix %s" % swap_fix)
-
-        # now equilibrate with the final potential on its own
-        lmp.command(self._pure_pair_style_command(final))
-        for command in self._pure_pair_coeff_commands(final):
-            lmp.command(command)
-
-        # Thermo output.
-        lmp.command("thermo_style    custom step pe")
-        lmp.command("thermo          1000")
-
-        # run eqbrm run
-        lmp.command("run             %d" % self.calc.n_equilibration_steps)
-
-        # ---------------------------------------------------------------
-        # BKD cycle: initial potential scaled 0 -> 1, final potential 1 -> 0
-        # ---------------------------------------------------------------
-        lmp.command("variable         flambda equal ramp(${lf},${li})")
-        lmp.command("variable         blambda equal ramp(${li},${lf})")
-
-        commands, compute_ids = self._scaled_pair_commands(
-            initial, final, "v_flambda", "v_blambda"
-        )
-        for command in commands:
-            lmp.command(command)
-
-        swap_fixes = self._add_swap_fixes(
-            lmp, self.calc.monte_carlo.reverse_swap_types, "Reverse"
-        )
-
-        # Thermo output.
-        lmp.command("thermo_style    custom step v_dU1 v_dU2")
-        lmp.command("thermo          1000")
-
-        # save the necessary items to a file: first step
-        lmp.command(
-            'fix             f2 all print 1 "${dU1} ${dU2} ${flambda}" '
-            'title "# dU_1[eV/atom] dU_2[eV/atom] lambda" '
-            "screen no file backward_%d.dat"
-            % iteration
-        )
-        lmp.command("run             %d" % self.calc._n_switching_steps)
-
-        lmp.command("unfix           f2")
-        for compute_id in compute_ids:
-            lmp.command("uncompute       %s" % compute_id)
-        for swap_fix in swap_fixes:
-            lmp.command("unfix %s" % swap_fix)
-
-        self.lammps_close(lmp=lmp)
         lmp.rotate_logs("integration")
 
     def _add_swap_fixes(self, lmp, swap_types, pass_name):
