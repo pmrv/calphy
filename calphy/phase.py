@@ -1450,10 +1450,6 @@ class Phase:
         ``p_start → p_stop``; the equilibration runs before it stay at a
         constant pressure.  Re-defining the fix drops its ``fix_modify``
         settings, so the COM-corrected temperature compute is re-attached.
-        The ``fixedpoint`` is the centre of mass, as for the equilibration
-        fix it replaces: it only sets the point about which the box dilates
-        (LAMMPS' default is the box centre) and has no thermodynamic effect,
-        but keeping it the same avoids a shift of the atoms at the re-issue.
 
         A linear ramp equals λp only when λ is linear in the step, i.e. for
         the ``linear`` schedule; the input validation rejects
@@ -1912,21 +1908,6 @@ class Phase:
         ``conf.ts.forward_{iteration}.data``) followed by
         :meth:`_reversible_scaling_backward` (middle equilibration at Tf +
         backward sweep).
-
-        Thermostat and barostat targets through one cycle, with p the
-        target pressure, T0 and Tf the sweep end temperatures and
-        lf = T0/Tf.  The thermostat is at T0 throughout: the temperature
-        axis is swept by scaling the potential to λU, and the barostat
-        follows λp so that the scaled system at (T0, λp) is the real
-        system at (T0/λ, p)::
-
-            flowchart TD
-                A["warm start<br/>U, T0, p"]
-                B["COM-constrained equilibration<br/>U, T0, p"]
-                C["forward sweep<br/>λU, λ: 1 → lf<br/>T0, barostat p → lf·p"]
-                D["middle equilibration<br/>lf·U, T0, lf·p<br/>(= real system at Tf, p)"]
-                E["backward sweep<br/>λU, λ: lf → 1<br/>T0, barostat lf·p → p"]
-                A --> B --> C --> D --> E
 
         Parameters
         ----------
