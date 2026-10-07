@@ -1443,20 +1443,21 @@ class Phase:
         Sampling the scaled Hamiltonian λU at (T0, λp) is equivalent to
         sampling U at (T0/λ, p).  The sweep therefore has to barostat the
         scaled system at **λp**, not at the full target pressure p, for the
-        recorded volumes to lie on the real isobar that
-        :func:`~calphy.integrators.integrate_rs` assumes when it adds the
-        constant p·V term.  ``fix npt`` ramps its target linearly over a
-        ``run``, so the fix is re-defined here, immediately before the sweep
-        run, with the ramp ``p_start → p_stop``; the equilibration runs before
-        it stay at a constant pressure.  Re-defining the fix drops its
-        ``fix_modify`` settings, so the COM-corrected temperature compute is
-        re-attached.
+        recorded volumes to lie on the real isobar that the integration
+        assumes when it adds the constant p·V term.  ``fix npt`` ramps its
+        target linearly over a ``run``, so the fix is re-defined here,
+        immediately before the sweep run, with the ramp
+        ``p_start → p_stop``; the equilibration runs before it stay at a
+        constant pressure.  Re-defining the fix drops its ``fix_modify``
+        settings, so the COM-corrected temperature compute is re-attached.
+        The ``fixedpoint`` is the centre of mass, as for the equilibration
+        fix it replaces: it only sets the point about which the box dilates
+        (LAMMPS' default is the box centre) and has no thermodynamic effect,
+        but keeping it the same avoids a shift of the atoms at the re-issue.
 
-        The ramp reproduces λp exactly because λ is linear in the step for
-        the ``linear`` schedule.  ``uniform_temperature`` makes λ a hyperbola
-        in the step, and no LAMMPS barostat accepts a variable target, so
-        that schedule is refused at finite pressure by the input validation
-        (at p = 0 the ramp is 0 → 0 and the schedule is exact).
+        A linear ramp equals λp only when λ is linear in the step, i.e. for
+        the ``linear`` schedule; the input validation rejects
+        ``uniform_temperature`` at finite pressure for that reason.
 
         Parameters
         ----------
@@ -1621,7 +1622,12 @@ class Phase:
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
 
-        # ── Barostat ramp pi -> pf = lf*pi (see _rs_sweep_barostat) ─────────
+        # ── Sweep barostat: pi -> lf*pi ────────────────────────────────────
+        # The potential is scaled to lambda*U during the sweep, and the
+        # scaled system at (T0, lambda*p) is the real system at (T0/lambda, p).
+        # So the barostat target has to follow lambda*p: it ramps from pi at
+        # lambda = 1 to lf*pi at lambda = lf.  fix npt ramps linearly over a
+        # run, which is exactly lambda*p for the linear lambda schedule.
         if self.calc.npt:
             self._rs_sweep_barostat(lmp, t0, pi, pf)
 
@@ -1771,9 +1777,9 @@ class Phase:
         lmp.command("variable         ycm equal xcm(all,y)")
         lmp.command("variable         zcm equal xcm(all,z)")
 
-        # The potential is scaled by lf here, so the barostat has to hold the
-        # scaled pressure pf = lf*pi for this state to be the real system at
-        # (Tf, pi) -- see _rs_sweep_barostat.
+        # The potential is scaled by lf here, and the scaled system at
+        # (T0, lf*pi) is the real system at (Tf, pi).  So the barostat holds
+        # pf = lf*pi for this equilibration, not the full target pressure.
         if self.calc.npt:
             lmp.command(
                 "fix               f1 all npt temp %f %f %f %s %f %f %f "
@@ -1838,7 +1844,9 @@ class Phase:
         for cmd in ph.hybrid_pair_coeff_commands(self.calc):
             lmp.command(cmd)
 
-        # ── Barostat ramp pf -> pi (see _rs_sweep_barostat) ─────────────────
+        # ── Sweep barostat: lf*pi -> pi ────────────────────────────────────
+        # Mirror of the forward sweep: lambda runs lf -> 1, so the barostat
+        # target lambda*p ramps from lf*pi back to pi over the sweep run.
         if self.calc.npt:
             self._rs_sweep_barostat(lmp, t0, pf, pi)
 
@@ -1904,6 +1912,21 @@ class Phase:
         ``conf.ts.forward_{iteration}.data``) followed by
         :meth:`_reversible_scaling_backward` (middle equilibration at Tf +
         backward sweep).
+
+        Thermostat and barostat targets through one cycle, with p the
+        target pressure, T0 and Tf the sweep end temperatures and
+        lf = T0/Tf.  The thermostat is at T0 throughout: the temperature
+        axis is swept by scaling the potential to λU, and the barostat
+        follows λp so that the scaled system at (T0, λp) is the real
+        system at (T0/λ, p)::
+
+            flowchart TD
+                A["warm start<br/>U, T0, p"]
+                B["COM-constrained equilibration<br/>U, T0, p"]
+                C["forward sweep<br/>λU, λ: 1 → lf<br/>T0, barostat p → lf·p"]
+                D["middle equilibration<br/>lf·U, T0, lf·p<br/>(= real system at Tf, p)"]
+                E["backward sweep<br/>λU, λ: lf → 1<br/>T0, barostat lf·p → p"]
+                A --> B --> C --> D --> E
 
         Parameters
         ----------
@@ -2048,8 +2071,8 @@ class Phase:
         lmp.command("unfix             1")
 
         # ── Real-thermostat ramp T0 -> Tf, recording every step ─────────────
-        # The real system is heated along the isobar, so the barostat stays
-        # at p0 (the λp ramp belongs to the scaled-potential sweep only).
+        # The real system is heated with the unscaled potential along the
+        # isobar, so the barostat stays at p0.
         lmp.command("variable          dU      equal pe/atoms")
         lmp.command(
             "fix               f2 all npt temp %f %f %f %s %f %f %f"
@@ -2209,8 +2232,7 @@ class Phase:
         li = 1
         lf = t0 / tf
         # tscale ramps the real thermostat with the unscaled potential, so
-        # the barostat stays at the target pressure throughout (the λp ramp
-        # belongs to the scaled-potential sweep in mode ts).
+        # nothing else needs scaling
         p0 = self.calc._pressure
 
         # create lammps object
