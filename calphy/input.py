@@ -637,6 +637,10 @@ class Calculation(_StrictInput, title="Main input class"):
     _temperature_input: float = PrivateAttr(default=None)
 
     melting_cycle: Annotated[bool, Field(default=True)]
+    # largest multiplier of temperature_high the melting cycle escalates to
+    # (attempts at 1.0, 1.1, ...); the default 1.9 is the historical ladder,
+    # 1.0 means a single attempt at temperature_high
+    melting_cycle_max_factor: Annotated[float, Field(default=1.9, ge=1.0)]
 
     pair_style: Annotated[
         Union[List[str], None], BeforeValidator(to_list), Field(default=None)

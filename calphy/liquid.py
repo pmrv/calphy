@@ -103,7 +103,7 @@ class Liquid(cph.Phase):
         melted = False
 
         # this is the multiplier for thigh to try melting routines
-        for thmult in np.arange(1.0, 2.0, 0.1):
+        for thmult in np.arange(1.0, self.calc.melting_cycle_max_factor + 0.05, 0.1):
 
             trajfile = os.path.join(self.simfolder, "traj.melt")
             if os.path.exists(trajfile):
